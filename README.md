@@ -14,6 +14,7 @@ npm run build:local    # same, canonical URLs for http://localhost:8080
 npm run check          # validate only, write nothing
 npm run sync           # copy markdown from a sibling belmont-news/blogs checkout
 npm run serve          # serve dist/ on :8080
+npm test               # renderer tests
 npm run dev            # build:local then serve
 npm run sync -- --from-github EasySchedule/belmont-news-blogs@main
 ```
@@ -29,8 +30,25 @@ touching this repository.
 empty source list fails the same way here as it does in `belmont-news/blogs`.
 There is no flag to skip it.
 
+It also refuses a source with no title. A source the reader cannot name is not a
+source, and this is the check that would have caught the parser defect behind
+BEL-45: the front matter parser read only the `- ` marker lines of a `sources:`
+block and dropped every continuation line, so each source became the string
+`"type: document"` and every published post printed `Document .` in place of its
+sources. The length check passed the whole time. That is fixed, and
+`npm test` now reads the rendered HTML so it cannot come back.
+
 If the content directory is missing the build fails with the sync command rather
 than publishing an empty site.
+
+## Tests
+
+```
+npm test               # node --test, no dependencies
+```
+
+The renderer tests build fixtures and read the HTML that comes out, so a field
+that stops reaching the page is a failing test and not a silent blank.
 
 ## Layout
 

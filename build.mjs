@@ -193,26 +193,72 @@ function markdown(src) {
 
 // --------------------------------------------------------- front matter
 
+const PAIR = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
+
+// The blogs repo writes two list shapes, and this parser has to read both. A list
+// of scalars:
+//
+//   tags:
+//     - weather
+//
+// and a list of mappings, where the first field rides on the `- ` marker and the
+// rest are indented continuation lines:
+//
+//   sources:
+//     - type: document
+//       title: "..."
+//       retrieved: 2026-10-02
+//
+// A `- ` marker always opens a new item, and the continuation lines after it
+// fill that item. Reading only the marker lines, as this did, turned every
+// source into the literal string "type: document" and dropped title,
+// organization, retrieved and url, so every published post printed "Document ."
+// once per source instead of naming anything.
 function parseFrontMatter(text, file) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
   if (!m) fail(`${file} has no front matter block`);
   const data = {};
-  let key = null;
+  let listKey = null;
   for (const raw of m[1].split(/\r?\n/)) {
-    if (!raw.trim()) continue;
+    if (!raw.trim() || raw.trim().startsWith('#')) continue;
     if (/^\s/.test(raw)) {
+      if (!listKey || !Array.isArray(data[listKey])) continue;
       const item = raw.trim();
-      if (!key) continue;
-      if (!Array.isArray(data[key])) data[key] = [];
-      if (item.startsWith('- ')) data[key].push(scalar(item.slice(2)));
+      if (item === '-') { data[listKey].push({}); continue; }
+      if (item.startsWith('- ')) { data[listKey].push(newListItem(item.slice(2))); continue; }
+      pushInline(data, listKey, item);
       continue;
     }
-    const km = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/.exec(raw);
+    const km = PAIR.exec(raw);
     if (!km) fail(`${file} has an unparseable front matter line: ${raw.trim()}`);
-    key = km[1];
-    data[key] = km[2].trim() === '' ? [] : scalar(km[2].trim());
+    const value = km[2].trim();
+    if (value === '') {
+      data[km[1]] = [];
+      listKey = km[1];
+      continue;
+    }
+    listKey = null;
+    data[km[1]] = scalar(value);
   }
   return { data, body: m[2] ?? '' };
+}
+
+function newListItem(text) {
+  const kv = PAIR.exec(text);
+  if (!kv) return scalar(text);
+  return { [kv[1]]: scalar(kv[2].trim()) };
+}
+
+function pushInline(data, listKey, text) {
+  const arr = data[listKey];
+  const kv = PAIR.exec(text);
+  if (!kv) { arr.push(scalar(text)); return; }
+  const last = arr[arr.length - 1];
+  if (last !== null && typeof last === 'object' && !Array.isArray(last)) {
+    last[kv[1]] = scalar(kv[2].trim());
+    return;
+  }
+  arr.push({ [kv[1]]: scalar(kv[2].trim()) });
 }
 
 function scalar(v) {
@@ -258,6 +304,14 @@ const posts = files.map((f) => {
   if (!Array.isArray(data.sources) || !data.sources.length) {
     fail(`${rel}: has no sources. An unsourced post does not publish.`);
   }
+  // A source the reader cannot name is not a source. This check is what makes a
+  // future parser regression loud: the parser once turned every entry into the
+  // string "type: document", which passed the length test above and published a
+  // page of "Document ." with no name, no body and no retrieval date.
+  data.sources.forEach((s, i) => {
+    const named = s && typeof s === 'object' && !Array.isArray(s) && String(s.title || '').trim();
+    if (!named) fail(`${rel}: sources[${i}] has no title. A source the reader cannot name does not publish.`);
+  });
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 

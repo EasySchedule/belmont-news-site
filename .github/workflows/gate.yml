@@ -35,3 +35,19 @@ jobs:
       # Validates the committed content snapshot, writes nothing.
       - name: Build gate
         run: node build.mjs --content content --check
+
+  tests:
+    name: Renderer tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # A source the reader cannot see is a failed publish. The gate above only
+      # checks that a post has a non-empty sources list, which a broken parser
+      # satisfies while printing nothing. These tests read the rendered HTML.
+      - name: node --test
+        run: node --test test/render.test.mjs
