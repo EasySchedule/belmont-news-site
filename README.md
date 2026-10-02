@@ -20,9 +20,11 @@ npm run dev            # build:local then serve
 npm run sync -- --from-github EasySchedule/belmont-news-blogs@main
 ```
 
-`npm run sync` is what makes this repository self-contained. The blogs repository
-is the source of truth; CI syncs from GitHub before building so a blog commit
-publishes without anyone touching this repository.
+`npm run sync` is what makes this repository self-contained. `content/` is a copy
+of `belmont-news/blogs/content` and `corrections/` is a copy of
+`belmont-news/blogs/corrections`; the blogs repository is the source of truth. CI
+syncs from GitHub before building so a blog commit publishes without anyone
+touching this repository.
 
 ## What the sync copies
 
@@ -163,6 +165,11 @@ npm test               # node --test, no dependencies
 The renderer tests build fixtures and read the HTML that comes out, so a field
 that stops reaching the page is a failing test and not a silent blank.
 
+`test/build.test.mjs` holds the two rules this build exists to enforce: a
+publication instant resolves against the newsroom time zone across both DST
+boundaries, and no `pubDate` is ever later than the build. It also pins the
+corrections-log parser to the newsroom's format.
+
 ## Layout
 
 | Path | What it is |
@@ -176,6 +183,7 @@ that stops reaching the page is a failing test and not a silent blank.
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
+| `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish on every push to `main`. |
 | `.github/workflows/gate.yml` | The same check on every pull request. |
