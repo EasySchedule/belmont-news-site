@@ -4,9 +4,11 @@
   "private": true,
   "description": "Belmont News. Independent local news for Belmont County, Ohio. Static site, zero runtime dependencies.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "node build.mjs --content content --out dist --site-url https://belmont-news.github.io/site",
+    "build": "node build.mjs --content content --out dist --site-url https://easyschedule.github.io/belmont-news-site",
     "build:local": "node build.mjs --content content --out dist --site-url http://localhost:8080",
     "check": "node build.mjs --content content --check",
     "sync": "node scripts/sync-content.mjs",
