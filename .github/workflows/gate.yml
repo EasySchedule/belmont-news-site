@@ -1,0 +1,37 @@
+# The editorial build gate, on every pull request.
+#
+# This repository publishes what it renders, so a pull request that would drop
+# a source or break a post must be caught before it merges, not after. pages.yml
+# already runs the same check on push to main, which is the publish path and
+# stays the only place the site is built for production. This workflow is the
+# pre-merge half: pull_request only, so main keeps exactly one publish path.
+#
+# build.mjs exits non-zero when a post does not clear the newsroom standard.
+# No step here tolerates a failure.
+
+name: Sourcing gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Editorial gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Validates the committed content snapshot, writes nothing.
+      - name: Build gate
+        run: node build.mjs --content content --check
