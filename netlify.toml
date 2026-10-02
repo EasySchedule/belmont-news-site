@@ -1,0 +1,37 @@
+# Belmont News on Netlify. Free tier.
+# Build command and publish directory are the only two settings a deploy needs;
+# the rest are guardrails so a broken build never replaces a good site.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+  # PUBLIC_POSTHOG_KEY is set in the Netlify site settings, never in this file.
+
+[context.production.environment]
+  NODE_ENV = "production"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "SAMEORIGIN"
+
+[[headers]]
+  for = "/feed.xml"
+  [headers.values]
+    Content-Type = "application/rss+xml; charset=utf-8"
+
+[[headers]]
+  for = "/sitemap.xml"
+  [headers.values]
+    Content-Type = "application/xml; charset=utf-8"
+
+[[redirects]]
+  from = "/rss"
+  to = "/feed.xml"
+  status = 301
+  force = true

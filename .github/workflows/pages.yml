@@ -1,0 +1,56 @@
+# Publish the Belmont News site to GitHub Pages on every push to main.
+# Netlify runs the same npm run build from netlify.toml, so the two hosts
+# render byte-identical HTML from the same markdown.
+
+name: Publish site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The markdown store is the source of truth. Pull it at build time so a
+      # blog commit publishes without touching this repository.
+      - name: Sync blogs repository
+        run: node scripts/sync-content.mjs --from-github EasySchedule/belmont-news-blogs@main
+
+      # The gate runs inside the build. An unsourced post fails here and never
+      # reaches the deploy step.
+      - name: Build
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
