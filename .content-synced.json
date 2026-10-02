@@ -1,7 +1,13 @@
 {
-  "syncedAt": "2026-10-02T23:25:18.026Z",
-  "source": "../blogs/content",
-  "sourceHead": null,
+  "syncedAt": "2026-10-02T23:51:37.323Z",
+  "source": "EasySchedule/belmont-news-blogs@main",
+  "sourceHead": "bc766e216673c370765613bf97e8dedbecf559a1",
   "markdownFiles": 4,
-  "destination": "content"
+  "destination": "content",
+  "correctionsSource": "corrections",
+  "correctionsFiles": 1,
+  "correctionsFilesList": [
+    "2026-10.md"
+  ],
+  "correctionsDestination": "corrections"
 }
