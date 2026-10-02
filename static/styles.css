@@ -237,6 +237,55 @@ tbody tr:hover { background: var(--accent-soft); }
 .back a { color: var(--accent); text-decoration: none; }
 .back a:hover { text-decoration: underline; }
 
+/* ---------------------------------------------------------- corrections */
+
+.corrections-log { margin: 2rem 0 0; }
+
+.correction {
+  border-top: 1px solid var(--rule);
+  padding: 1.4rem 0 0.2rem;
+}
+
+.correction:first-child { border-top: 0; padding-top: 0.4rem; }
+
+.correction .kicker {
+  margin: 0 0 0.3rem;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.correction h2 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.correction-text { margin: 0 0 0.6rem; }
+
+.correction-meta {
+  margin: 0 0 0.3rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.corrections-card .byline { margin: 0.2rem 0 0; }
+
+.empty {
+  margin: 1.5rem 0 0;
+  padding: 0.9rem 1rem;
+  background: var(--accent-soft);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
 /* --------------------------------------------------------------- footer */
 
 .site-footer {

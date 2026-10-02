@@ -9,8 +9,10 @@
 // audit between the markdown and the page.
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NEWSROOM_TZ, publicationInstant, buildEpochMs } from './scripts/dates.mjs';
+import { readCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -21,10 +23,14 @@ const USAGE = `build.mjs - render the Belmont News site
 Usage: node build.mjs [options]
 
   --content <dir>   markdown content directory  (default content)
+  --corrections <dir>  corrections log directory (default corrections)
   --out <dir>       output directory            (default dist)
   --base-url <url>  site base URL path or origin (default /)
   --site-url <url>  canonical origin for feeds  (default http://localhost:8080)
   --title <text>    site title                 (default Belmont News)
+  --build-epoch <unix-seconds>  when this build shipped (default SOURCE_DATE_EPOCH,
+                                else the wall clock). Caps every feed timestamp,
+                                so no item is ever dated in the future.
   --check           validate only, write nothing
   --help            this text
 
@@ -32,10 +38,14 @@ Environment:
   PUBLIC_POSTHOG_KEY   PostHog project key. When unset, no analytics snippet is
                       emitted at all. The build never fails on a missing key and
                       never hard-codes one.
+  SOURCE_DATE_EPOCH    Same meaning as --build-epoch. CI sets it from the commit
+                      being deployed so a build is reproducible from Git.
+  TZ_FOR_DATES         Time zone for publication instants (default
+                      ${NEWSROOM_TZ}). Named, never a numeric offset.
 `;
 
 function parseArgs(argv) {
-  const o = { content: 'content', out: 'dist', baseUrl: '/', siteUrl: 'http://localhost:8080', title: 'Belmont News', check: false };
+  const o = { content: 'content', corrections: 'corrections', out: 'dist', baseUrl: '/', siteUrl: 'http://localhost:8080', title: 'Belmont News', buildEpoch: null, check: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => {
@@ -46,10 +56,12 @@ function parseArgs(argv) {
       return argv[++i];
     };
     if (a === '--content') o.content = val();
+    else if (a === '--corrections') o.corrections = val();
     else if (a === '--out') o.out = val();
     else if (a === '--base-url') o.baseUrl = val();
     else if (a === '--site-url') o.siteUrl = val().replace(/\/$/, '');
     else if (a === '--title') o.title = val();
+    else if (a === '--build-epoch') o.buildEpoch = val();
     else if (a === '--check') o.check = true;
     else if (a === '--help') { process.stdout.write(USAGE); process.exit(0); }
     else {
@@ -317,6 +329,78 @@ const posts = files.map((f) => {
 
 posts.sort((a, b) => (b.fm.date || '').localeCompare(a.fm.date || '') || (a.fm.slug).localeCompare(b.fm.slug));
 
+// ------------------------------------------------------------ corrections
+
+// The corrections log is editorial record, not posts. It is read from its own
+// directory and rendered at /corrections/, which always exists so the URL is
+// stable from the first deploy onwards.
+const NEWSROOM = process.env.TZ_FOR_DATES || NEWSROOM_TZ;
+const SHIPPED_AT = buildEpochMs(opts.buildEpoch);
+const corrections = readCorrections(resolve(opts.corrections));
+const postUrls = new Set(posts.map((p) => p.url));
+
+// A correction names the post it corrects. Link it only when that post is in
+// this build; a correction can outlive the post it refers to, and a dead link
+// in a corrections log is worse than plain text.
+//
+// The date and slug print with the newsroom's own em dash, so the identifying
+// line on the page is character-for-character the `## <date> — <slug>` heading
+// in corrections/2026-10.md and a reader can match the two without editing.
+function correctionPostRef(e) {
+  const url = `${e.postDate}/${e.slug}/`;
+  const label = `<time datetime="${esc(e.postDate)}">${esc(e.postDate)}</time> — ${esc(e.slug)}`;
+  return postUrls.has(url) ? `<a href="${esc(key(url))}">${label}</a>` : label;
+}
+
+function correctionEntry(e) {
+  return `  <article class="correction">
+    <p class="kicker">${correctionPostRef(e)}</p>
+    <h2>Correction (<time datetime="${esc(e.correctionDate)}">${esc(e.correctionDate)}</time>)</h2>
+    <p class="correction-text">${esc(e.correction)}</p>
+    ${e.publishedIn ? `<p class="correction-meta">Published in: ${esc(e.publishedIn)}</p>` : ''}
+    ${e.correctedBy ? `<p class="correction-meta">Corrected by: ${esc(e.correctedBy)}</p>` : ''}
+  </article>`;
+}
+
+function correctionsIndexPage() {
+  const listing = corrections.logs.map((log) => `
+  <article class="card corrections-card">
+    <h2><a href="${esc(key(correctionsMonthUrl(log.month)))}">${esc(log.title || `Corrections, ${log.month}`)}</a></h2>
+    <p class="byline">${log.entries.length} correction${log.entries.length === 1 ? '' : 's'} on record</p>
+  </article>`).join('\n');
+
+  const body = `
+<h1 class="page-title">Corrections</h1>
+<p class="lede">Every correction Belmont News has published, on one page. A correction is
+appended and never deleted, and a correction that is itself wrong stays and gets its own
+correction underneath it.</p>
+${corrections.logs.length ? `<section class="feed">
+${listing}
+</section>` : '<p class="empty">No correction has been logged yet. If a number here is ever wrong, the correction is published the same day and listed on this page.</p>'}`;
+  return shell({
+    title: 'Corrections — Belmont News',
+    description: 'Every correction Belmont News has published.',
+    body,
+    canonical: abs(correctionsIndexUrl),
+  });
+}
+
+function correctionsMonthPage(log) {
+  const body = `
+<h1 class="page-title">${esc(log.title || `Corrections, ${log.month}`)}</h1>
+${log.standingRule ? `<p class="lede">${esc(log.standingRule)}</p>` : ''}
+<section class="corrections-log">
+${log.entries.map(correctionEntry).join('\n')}
+</section>
+<p class="back"><a href="${esc(key(correctionsIndexUrl))}">← All corrections</a></p>`;
+  return shell({
+    title: `${log.title || `Corrections, ${log.month}`} — Belmont News`,
+    description: `Corrections published by Belmont News in ${log.month}.`,
+    body,
+    canonical: abs(correctionsMonthUrl(log.month)),
+  });
+}
+
 // --------------------------------------------------------------- output
 
 const base = opts.baseUrl.endsWith('/') ? opts.baseUrl : `${opts.baseUrl}/`;
@@ -355,6 +439,7 @@ ${analytics()}
   <p class="tagline">Independent local news for Belmont County, Ohio</p>
   <nav>
     <a href="${esc(key(''))}">Latest</a>
+    <a href="${esc(key(correctionsIndexUrl))}">Corrections</a>
     <a href="${esc(key('feed.xml'))}">RSS</a>
     <a href="https://api.weather.gov/zones/forecast/OHZ059">NWS OHZ059</a>
   </nav>
@@ -364,7 +449,7 @@ ${body}
 </main>
 <footer class="site-footer">
   <p>Belmont News. Belmont County, Ohio. Newsroom time zone America/New_York.</p>
-  <p>Every claim carries a named on-record source or an on-record document. Corrections are published, never silently applied.</p>
+  <p>Every claim carries a named on-record source or an on-record document. Corrections are published, never silently applied. <a href="${esc(key(correctionsIndexUrl))}">Read the corrections log</a>.</p>
   <p>Weather source of record: National Weather Service, gridpoint forecast <code>PBZ/50,48</code>, forecast zone <code>OHZ059</code>.</p>
 </footer>
 </body>
@@ -399,6 +484,7 @@ function correctionsBlock(corrections) {
   <ul>
 ${items}
   </ul>
+  <p><a href="${esc(key(correctionsIndexUrl))}">Full corrections log</a></p>
 </section>`;
 }
 
@@ -443,12 +529,33 @@ ${cards}
   return shell({ title: 'Belmont News — Belmont County, Ohio', description: 'Independent local news for Belmont County, Ohio.', body, canonical: abs('') });
 }
 
+// -------------------------------------------------------------- feed
+
+// Each post gets one publication instant, decided in scripts/dates.mjs and
+// printed in build-info.json so a reader or a reporter can audit it.
+//
+// The rule that matters: an item is never dated after this build shipped. The
+// newsroom files tomorrow's 06:00 edition the evening before, so a stamp taken
+// from the calendar date alone lands up to a day in the future, and a feed
+// reader treats a future item as unreadable. Clamping to the build instant is
+// also the honest answer to "when did this reach the reader".
+//
+// The rule that also matters: the offset is never written down. -04:00 is right
+// until 2026-11-01 and wrong forever after. The instant is resolved against the
+// America/New_York tz database at build time, so the EST change is a tzdata
+// update and not a code change.
+const feedItems = posts
+  .map((p) => ({ post: p, publishedAt: publicationInstant(p.fm, SHIPPED_AT, NEWSROOM) }))
+  .sort((a, b) => b.publishedAt - a.publishedAt
+    || (b.post.fm.date || '').localeCompare(a.post.fm.date || '')
+    || a.post.fm.slug.localeCompare(b.post.fm.slug));
+
 function feed() {
-  const items = posts.map((p) => `  <item>
+  const items = feedItems.map(({ post: p, publishedAt }) => `  <item>
     <title>${esc(p.fm.title)}</title>
     <link>${esc(abs(p.url))}</link>
     <guid isPermaLink="true">${esc(abs(p.url))}</guid>
-    <pubDate>${new Date(`${p.fm.date}T12:00:00-04:00`).toUTCString()}</pubDate>
+    <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>
     <author>${esc(p.fm.byline)}</author>
     <category>${esc(p.fm.category || 'news')}</category>
     <description>${esc(p.fm.dek || '')}</description>
@@ -461,7 +568,7 @@ function feed() {
   <atom:link href="${esc(abs('feed.xml'))}" rel="self" type="application/rss+xml" />
   <description>Independent local news for Belmont County, Ohio.</description>
   <language>en-us</language>
-  <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+  <lastBuildDate>${new Date(SHIPPED_AT).toUTCString()}</lastBuildDate>
 ${items}
 </channel>
 </rss>
@@ -469,9 +576,14 @@ ${items}
 }
 
 function sitemap() {
-  const urls = ['', ...posts.map((p) => p.url)].map((u) => `  <url>
-    <loc>${esc(abs(u))}</loc>
-    ${u ? `<lastmod>${esc(posts.find((p) => p.url === u).fm.date)}</lastmod>` : ''}
+  const urls = [
+    { loc: abs(''), lastmod: '' },
+    ...posts.map((p) => ({ loc: abs(p.url), lastmod: p.fm.date })),
+    { loc: abs(correctionsIndexUrl), lastmod: corrections.logs[0]?.month || '' },
+    ...corrections.logs.map((log) => ({ loc: abs(correctionsMonthUrl(log.month)), lastmod: log.entries[0]?.correctionDate || log.month })),
+  ].map((u) => `  <url>
+    <loc>${esc(u.loc)}</loc>
+    ${u.lastmod ? `<lastmod>${esc(u.lastmod)}</lastmod>` : ''}
   </url>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -483,6 +595,14 @@ ${urls}
 if (opts.check) {
   process.stdout.write(`build.mjs: ${posts.length} post(s) valid, nothing written (--check)\n`);
   for (const p of posts) process.stdout.write(`build.mjs:   ${p.url}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+  if (corrections.logs.length) {
+    process.stdout.write(`build.mjs: ${corrections.logs.length} corrections log(s) valid\n`);
+    for (const log of corrections.logs) {
+      process.stdout.write(`build.mjs:   ${correctionsMonthUrl(log.month)}  ${log.entries.length} correction(s)\n`);
+    }
+  } else {
+    process.stdout.write(`build.mjs: no corrections log found under ${corrections.dir} (the page still builds)\n`);
+  }
   process.exit(0);
 }
 
@@ -496,18 +616,46 @@ for (const p of posts) {
 writeFileSync(join(outDir, 'index.html'), homePage());
 writeFileSync(join(outDir, 'feed.xml'), feed());
 writeFileSync(join(outDir, 'sitemap.xml'), sitemap());
+mkdirSync(join(outDir, correctionsIndexUrl), { recursive: true });
+writeFileSync(join(outDir, correctionsIndexUrl, 'index.html'), correctionsIndexPage());
+for (const log of corrections.logs) {
+  mkdirSync(join(outDir, correctionsMonthUrl(log.month)), { recursive: true });
+  writeFileSync(join(outDir, correctionsMonthUrl(log.month), 'index.html'), correctionsMonthPage(log));
+}
 writeFileSync(join(outDir, '404.html'), shell({
   title: 'Not found — Belmont News',
   body: '<h1 class="page-title">Not found</h1><p class="lede">That page is not here. <a href="/">Go to the front page</a>.</p>',
   canonical: abs('404.html'),
 }));
+
+// The build report carries the corrections file by name and the exact feed
+// timestamps it emitted, so a reporter checking the live site can see what this
+// build read and what it published without reading a build log.
 writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
   generated: new Date().toISOString(),
+  buildEpoch: SHIPPED_AT,
+  timezone: NEWSROOM,
   siteTitle: opts.title,
   siteUrl: opts.siteUrl,
   posthogEnabled: Boolean(posthogKey),
   posts: posts.length,
   contentFiles: files.length,
+  correctionsDir: relative(HERE, corrections.dir),
+  correctionsFiles: corrections.logs.length,
+  corrections: corrections.logs.map((log) => ({
+    file: `corrections/${log.month}.md`,
+    month: log.month,
+    url: `/${correctionsMonthUrl(log.month)}`,
+    entries: log.entries.length,
+    title: log.title,
+  })),
+  feed: feedItems.map(({ post: p, publishedAt }) => ({
+    url: `/${p.url}`,
+    date: p.fm.date,
+    edition: p.fm.edition || null,
+    pubDate: new Date(publishedAt).toUTCString(),
+    clampedToBuildEpoch: publishedAt === SHIPPED_AT,
+  })),
 }, null, 2)}\n`);
 copyFileSync(join(HERE, 'static', 'styles.css'), join(outDir, 'styles.css'));
 try {
@@ -516,4 +664,6 @@ try {
 
 process.stdout.write(`build.mjs: built ${posts.length} post(s) into ${opts.out}\n`);
 for (const p of posts) process.stdout.write(`build.mjs:   ${key(p.url)}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+process.stdout.write(`build.mjs: corrections ${corrections.logs.length ? `${corrections.logs.length} log(s), ${corrections.logs.reduce((n, l) => n + l.entries.length, 0)} entry(ies) at ${key(correctionsIndexUrl)}` : `none found under ${relative(process.cwd(), corrections.dir)}`}\n`);
+process.stdout.write(`build.mjs: feed clock ${new Date(SHIPPED_AT).toUTCString()} ${NEWSROOM}, no item dated later\n`);
 process.stdout.write(`build.mjs: analytics ${posthogKey ? 'enabled' : 'disabled (PUBLIC_POSTHOG_KEY unset)'}\n`);

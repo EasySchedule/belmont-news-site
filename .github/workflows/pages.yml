@@ -31,14 +31,22 @@ jobs:
           node-version: '22'
 
       # The markdown store is the source of truth. Pull it at build time so a
-      # blog commit publishes without touching this repository.
+      # blog commit publishes without touching this repository. Both trees come
+      # over: content/ for posts and corrections/ for the corrections log.
       - name: Sync blogs repository
         run: node scripts/sync-content.mjs --from-github EasySchedule/belmont-news-blogs@main
 
       # The gate runs inside the build. An unsourced post fails here and never
       # reaches the deploy step.
+      #
+      # SOURCE_DATE_EPOCH is the commit being deployed, so the feed's timestamps
+      # are a function of Git rather than of the minute the runner happened to
+      # start. It is also the ceiling on every pubDate, which is what keeps an
+      # edition filed ahead of its publication day out of the future.
       - name: Build
-        run: npm run build
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          npm run build
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
