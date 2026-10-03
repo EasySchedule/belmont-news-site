@@ -358,11 +358,25 @@ function correctionPostRef(e) {
   return postUrls.has(url) ? `<a href="${esc(key(url))}">${label}</a>` : label;
 }
 
+// Correction prose goes through inline(), not esc(). A correction quotes the post
+// it corrects, and it routinely quotes the words a reader can see on that post:
+// a status like `in_progress`, a document slug, an API field name. Rendering it
+// with esc() alone printed those backticks as characters, so on 2026-10-03 the
+// published log showed the reader 18 literal backticks where 9 code spans should
+// have been, while the post it quoted rendered the identical span correctly. The
+// two paths diverging is the whole defect, so the entry now uses the same
+// renderer the post does rather than a second, narrower one.
+//
+// inline() escapes before it transforms, so this stays as safe as esc() was, and
+// a code span holding markup comes out as text inside <code> rather than as
+// markup. The log stays append-only either way: nothing here edits a published
+// entry, it renders the bytes the desk already wrote.
+
 function correctionEntry(e) {
   return `  <article class="correction">
     <p class="kicker">${correctionPostRef(e)}</p>
     <h2>Correction (<time datetime="${esc(e.correctionDate)}">${esc(e.correctionDate)}</time>)</h2>
-    <p class="correction-text">${esc(e.correction)}</p>
+    <p class="correction-text">${inline(e.correction)}</p>
     ${e.publishedIn ? `<p class="correction-meta">Published in: ${esc(e.publishedIn)}</p>` : ''}
     ${e.correctedBy ? `<p class="correction-meta">Corrected by: ${esc(e.correctedBy)}</p>` : ''}
   </article>`;

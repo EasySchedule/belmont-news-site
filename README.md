@@ -87,6 +87,15 @@ A correction is linked to its post only when that post is in the same build. A
 correction can outlive the post it refers to, and a dead link in a corrections
 log is worse than plain text.
 
+Entry prose is rendered as inline markdown by the same renderer a post body uses,
+so a correction that quotes the post it corrects quotes it as the reader sees it.
+That matters most for backticked constructs: a correction citing a status like
+`in_progress`, a document slug, or an API field name renders those as `<code>`,
+exactly as the quoted post does, rather than printing the backticks as
+characters. A code span holding markup comes out as text inside `<code>`, because
+the renderer escapes before it transforms. The log stays append-only either way:
+rendering never edits, drops or reorders a published entry.
+
 `/build-info.json` names the file, its URL and its entry count, so the live site
 can be checked without reading a build log:
 

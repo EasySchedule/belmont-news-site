@@ -239,3 +239,127 @@ test('every post in the committed content snapshot names its sources', () => {
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------- the reader sees a correction
+
+// Build a corrections log in a temp tree and read back the month page the reader
+// gets. build.mjs takes --corrections as its own directory, so this exercises
+// the real corrections path end to end rather than a reimplementation of it.
+function renderCorrections(log) {
+  const root = mkdtempSync(join(tmpdir(), 'belmont-corrections-'));
+  try {
+    mkdirSync(join(root, 'corrections'), { recursive: true });
+    // The build refuses an empty site, so one post stands in. The corrections
+    // path does not read it; it is here so the build has something to publish
+    // alongside the log.
+    const post = join(root, 'content', '2026', '10', '2026-10-02', 'nathan-beausoleil--belmont-county-three-day-weather-roundup.md');
+    mkdirSync(dirname(post), { recursive: true });
+    writeFileSync(post, ['---', FRONT, SOURCES, '---', '', '## The roundup', '', 'Rain tonight.', ''].join('\n'));
+    writeFileSync(join(root, 'corrections', '2026-10.md'), log);
+    try {
+      const stdout = execFileSync('node', [BUILD, '--content', join(root, 'content'), '--corrections', join(root, 'corrections'), '--out', join(root, 'dist'), '--site-url', 'https://example.test'], {
+        cwd: root,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { code: 0, stdout, stderr: '', html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8') };
+    } catch (e) {
+      return { code: e.status, stdout: e.stdout || '', stderr: e.stderr || '', html: '' };
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function correctionTexts(html) {
+  return [...html.matchAll(/<p class="correction-text">([\s\S]*?)<\/p>/g)].map((m) => m[1]);
+}
+
+// The defect this guards: a correction quotes the post it corrects, so it quotes
+// backticked constructs, and the log rendered them with esc() while the post
+// rendered the same construct as <code>. A reader met 18 literal backticks on
+// /corrections/2026-10/ where 9 code spans belonged.
+test('a correction renders inline code as code, not as literal backticks', () => {
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+## 2026-10-03 — morning-briefing-2026-10-03
+
+Correction (2026-10-02): BEL-24 "is still \`in_progress\` and carries no \`lead-story-recommendation\` document".
+Published in: the 06:00 edition of Saturday 2026-10-03.
+Corrected by: Rosalind Kimbrough.
+`);
+  assert.equal(r.code, 0, r.stderr);
+  const [text] = correctionTexts(r.html);
+  assert.match(text, /<code>in_progress<\/code>/);
+  assert.match(text, /<code>lead-story-recommendation<\/code>/);
+  assert.doesNotMatch(text, /`/, 'a code span must not reach the reader as backtick characters');
+});
+
+// The wording of a published correction is the editorial record. Rendering must
+// not restate it: every character outside the backticks has to survive verbatim,
+// so a fix for legibility cannot quietly become an edit to what the desk said.
+test('rendering a correction changes its backticks and nothing else', () => {
+  const quoted = 'Sections 3 and 4 print \`probabilityOfPrecipitation.value\` of 33 percent "Chance Rain Showers" / For that period the grid returns 17 percent.';
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+## 2026-10-03 — morning-briefing-2026-10-03
+
+Correction (2026-10-02): ${quoted}
+Published in: the 06:00 edition of Saturday 2026-10-03.
+Corrected by: Rosalind Kimbrough.
+`);
+  assert.equal(r.code, 0, r.stderr);
+  const [text] = correctionTexts(r.html);
+  const visible = text.replace(/<code>([\s\S]*?)<\/code>/g, '$1')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  assert.equal(visible, quoted.replace(/`([^`]+)`/g, '$1'));
+});
+
+// inline() escapes before it transforms, so routing correction prose through it
+// cannot have weakened the escaping esc() gave. A code span holding markup is
+// the case that would show it: it must read as text, not become a tag.
+test('a code span in a correction holding markup stays text', () => {
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+## 2026-10-03 — morning-briefing-2026-10-03
+
+Correction (2026-10-02): the field \`<b>value</b>\` was printed raw.
+Published in: the 06:00 edition of Saturday 2026-10-03.
+Corrected by: Rosalind Kimbrough.
+`);
+  assert.equal(r.code, 0, r.stderr);
+  const [text] = correctionTexts(r.html);
+  assert.match(text, /<code>&lt;b&gt;value&lt;\/b&gt;<\/code>/);
+  assert.doesNotMatch(text, /<code><b>/);
+});
+
+// Rendering must not become an edit. The log is append-only, and a build that
+// dropped or reordered a published entry would be as much a deletion as editing
+// one in place, so the count and the order are asserted here.
+test('rendering keeps every entry, in the order the log has them', () => {
+  const entry = (date, what) => `## 2026-10-03 — morning-briefing-2026-10-03
+
+Correction (${date}): ${what}
+Published in: the 06:00 edition of Saturday 2026-10-03.
+Corrected by: Rosalind Kimbrough.
+`;
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+${entry('2026-10-02', 'first, printed \`NONE\`')}${entry('2026-10-02', 'second, printed 33 percent')}${entry('2026-10-03', 'third, printed \`in_progress\`')}
+`);
+  assert.equal(r.code, 0, r.stderr);
+  const texts = correctionTexts(r.html);
+  assert.equal(texts.length, 3, 'a published entry went missing from the log');
+  assert.match(texts[0], /first, printed <code>NONE<\/code>/);
+  assert.match(texts[1], /second, printed 33 percent/);
+  assert.match(texts[2], /third, printed <code>in_progress<\/code>/);
+});
