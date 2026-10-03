@@ -548,7 +548,7 @@ function sourcesBlock(sources) {
     const org = s.organization ? ` — ${s.organization}` : '';
     const date = s.retrieved ? `, retrieved ${s.retrieved}` : '';
     const link = s.url ? ` <a href="${esc(s.url)}" rel="noopener noreferrer" target="_blank">source</a>` : '';
-    return `    <li><span class="src-type">${label}</span> ${esc(s.title || '')}${esc(org)}${esc(date)}.${link}</li>`;
+    return `    <li><span class="src-type">${label}</span> ${esc(org)}${esc(date)}.${link}</li>`;
   }).join('\n');
   return `<section class="sources">
   <h2>Sources</h2>
