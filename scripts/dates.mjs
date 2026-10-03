@@ -42,6 +42,49 @@ export function zoneOffsetMs(t, timeZone = NEWSROOM_TZ) {
   return wall - Math.floor(t / 1000) * 1000;
 }
 
+// The calendar day an instant falls on, in a named zone, as YYYY-MM-DD.
+//
+// Not the UTC date. The newsroom runs America/New_York, so an instant at
+// 2026-10-04T03:00Z is still 2026-10-03 here, and a rule that asked for "the
+// UTC date" would roll the listing over an hour or two before the newsroom
+// day actually turns over.
+export function calendarDay(instantMs, timeZone = NEWSROOM_TZ) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const p = {};
+  for (const part of dtf.formatToParts(new Date(instantMs))) if (part.type !== 'literal') p[part.type] = part.value;
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+// True when a string is a calendar day that exists.
+//
+// The shape test alone is not enough. `2026-13-45` matches /^\d{4}-\d{2}-\d{2}$/
+// perfectly well, and anything that only checks the shape will go on to compare it
+// as text: `2026-13-45` sorts after any real day, so a rule asked "is this listing
+// stale?" about it answers no, and the failure is silent. Round-tripping through
+// Date.UTC is what turns the shape into a date.
+export function isRealDay(v) {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const t = Date.UTC(+v.slice(0, 4), +v.slice(5, 7) - 1, +v.slice(8, 10));
+  const d = new Date(t);
+  return Number.isFinite(t)
+    && d.getUTCFullYear() === +v.slice(0, 4)
+    && d.getUTCMonth() === +v.slice(5, 7) - 1
+    && d.getUTCDate() === +v.slice(8, 10);
+}
+
+// Add whole days to a calendar day. UTC arithmetic, deliberately: a calendar
+// day has no offset and no DST, and borrowing the newsroom zone here would
+// make the result depend on which side of a transition the day fell.
+export function addDays(day, n) {
+  const t = Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10)) + n * 86400000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
 // A wall-clock time on a calendar day, in a named zone, as a UTC instant.
 //
 //   zonedInstant('2026-10-03', 6, 0)  -> 2026-10-03T10:00:00Z   (EDT)

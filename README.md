@@ -12,7 +12,7 @@ Pages runner, and a laptop.
 npm run build          # render content/ into dist/, canonical URLs for GitHub Pages
 npm run build:local    # same, canonical URLs for http://localhost:8080
 npm run check          # validate only, write nothing
-npm test               # the feed-clock and corrections-log rules
+npm test               # the feed-clock, corrections-log, and listing-window rules
 npm run sync           # copy markdown from a sibling belmont-news/blogs checkout
 npm run serve          # serve dist/ on :8080
 npm test               # renderer tests
@@ -147,6 +147,108 @@ CI sets `SOURCE_DATE_EPOCH` from the commit being deployed
 bytes. `npm run build` locally falls back to the wall clock, and
 `--build-epoch <unix-seconds>` sets it explicitly.
 
+## The rolling listing
+
+The front page is a rolling listing. A post stops being "Latest" when the newsroom
+day moves on, whether or not anybody writes anything. Before this, a post dated
+2026-09-01 was still on the front page and still in `feed.xml` in October, so
+"Latest" meant "everything the archive has ever held".
+
+Three surfaces read the post set. Two of them apply the window and one does not,
+deliberately:
+
+| Surface | Expired post |
+| --- | --- |
+| `/` front page | Drops off the listing. |
+| `/feed.xml` | Drops out of the item list. |
+| `/sitemap.xml` | **Stays.** Every post is listed, listed or not. |
+| `/<date>/<slug>/` | **Stays**, at HTTP 200, with its sources and its corrections. |
+
+### What this is not
+
+**Not a withdrawal.** Ageing a listing is not retracting a story. Yesterday's
+three-day weather roundup is still the correct answer to "what was the forecast
+yesterday?", and the archive is the record. Nothing a reader can reach disappears,
+and nothing a search engine was promised is taken back.
+
+**Not a retraction of the feed.** RSS 2.0 has no way to withdraw an item, and this
+feed's `guid` is the permalink, which does not change. A reader's feed reader has
+already fetched any item that drops out of the feed and will keep it. Dropping the
+item takes nothing away from anyone who already has it, and the page at that
+permalink still resolves.
+
+**Not a correction.** Expiring a listing hides a post from the front page. It does
+not make any claim in the post's copy true, and it is not a way to remove
+something that should not have been published. The desk gate item ruled on BEL-87
+owns that, and this rule neither performs nor substitutes for it. Nothing here
+touches `index.mjs`'s gates in `belmont-news/blogs`, whose date window stays
+forward-only with no backward half, for the reason documented there.
+
+### The window
+
+A post dated D is listed for newsroom days D and D+1, and falls out at 00:00 on
+D+2. Two newsroom days is chosen so this rule changes nothing visible on the day
+it ships: every post in the archive on 2026-10-03 is inside a two-day window, so
+the first deploy strips nothing and the rule only becomes load-bearing once the
+archive is older than the window. A one-day window would have emptied the front
+page of last night's edition before the 06:00 reader arrived.
+
+Change it with `--listing-days <n>`, per build. The newsroom day is read in
+`America/New_York`, not UTC: an instant at 03:00Z is still the previous evening in
+Belmont County, and a rule that used the UTC date would roll the listing over
+before the newsroom day ended.
+
+### Per-post override
+
+The optional `expires` front matter field replaces the default window for one
+post:
+
+```yaml
+expires: 2026-10-30
+```
+
+It is a plain calendar day in `America/New_York`. A time of day is **refused**,
+not truncated: the newsroom changes offset on 2026-11-01, and a rule that picked
+one would be right for half the year. An `expires` before the post's own date is
+refused too. Both are refused in this build and in `belmont-news/blogs`, so a bad
+value fails at the pull request that introduced it as well as at deploy time.
+The field is declared in that repository's `schema.json`, which is what stops
+`additionalProperties: false` from rejecting a post that uses it.
+
+### The listing rolls on its own
+
+A listing that ages out on a calendar boundary needs a build on that boundary. The
+store-drift check cannot provide one: it compares the markdown commit against the
+commit the live site says it rendered, and on a quiet newsroom day those are equal,
+so it exits 0 and nothing publishes — while the front page sits there showing
+yesterday's edition to everyone who came for the 06:00 one.
+
+So `scripts/check-listing-stale.mjs` reads `listing.newsroomToday` out of the live
+`build-info.json` and compares it with the day in `America/New_York` now, and
+`publish-on-blogs-update.yml` runs it on the same fifteen-minute schedule. It is a
+lookup rather than an inference, and it needs no token: the site is public. Like
+the drift check it uses the exit-code contract `0` current, `1` publish, `2` could
+not tell, and `2` is a red run rather than a quiet no-op.
+
+```
+node scripts/check-listing-stale.mjs    # 0 current, 1 stale, 2 could not tell
+```
+
+**`SOURCE_DATE_EPOCH` deliberately does not drive the window.** CI sets it from the
+commit being deployed, so a scheduled rebuild dispatched with no new commit would
+judge the window against the day of the last commit and the front page would freeze.
+The listing reads the clock, the same way the clock is read inside the build.
+
+### When the window comes up empty
+
+The window can come up empty when the archive has a gap wider than it, for
+instance if nothing is filed over a holiday weekend. The front page is the worst
+place to publish a blank, so the listing falls back to the newest posts, the build
+warns on stderr, and `build-info.json` records `listing.fallback: true`. It does not
+fail the deploy: refusing to publish because a listing would be empty is worse than
+showing a slightly older story, and the gate already refuses to publish a site with
+no posts at all. Every post page and every sitemap entry is unaffected either way.
+
 ## The gate
 
 `build.mjs` refuses to publish a post without sources, and names the file. An
@@ -179,25 +281,42 @@ publication instant resolves against the newsroom time zone across both DST
 boundaries, and no `pubDate` is ever later than the build. It also pins the
 corrections-log parser to the newsroom's format.
 
+`test/expiry.test.mjs` covers the listing window end to end, with the newsroom day
+pinned so it does not depend on the day the suite runs. The assertions that matter
+most are the ones protecting a reader: an expired post must still have its page, its
+sources and its sitemap entry, and `sitemap.xml` must come out byte-identical on a
+day when the listing differs. One test pins the window to the wall clock rather
+than `SOURCE_DATE_EPOCH`, because the regression there is silent — the build
+succeeds and the front page simply stops rolling.
+
+`test/listing-stale.test.mjs` covers the check that keeps the listing moving,
+including the cases where it must exit 2 rather than report that there is nothing
+to do. A check that answered 0 when it could not read the site would freeze the
+front page and still report green every fifteen minutes.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `build.mjs` | The renderer. Markdown subset, page shells, RSS, sitemap, 404. |
 | `scripts/dates.mjs` | Publication instants for the feed. Zone-aware, no hardcoded offset. |
+| `scripts/expiry.mjs` | The listing window: which posts are still "Latest", and the `expires` override. |
 | `scripts/corrections.mjs` | Reads `corrections/YYYY-MM.md` into entries. |
 | `content/` | Synced copy of the markdown store. Not edited here. |
 | `corrections/` | Synced copy of the corrections log. Not edited here. |
 | `static/styles.css` | The only stylesheet. Print-first, dark-mode aware, no webfont. |
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
+| `scripts/check-listing-stale.mjs` | Answers "was the front page built for an earlier newsroom day?" and exits 0/1/2. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
+| `test/expiry.test.mjs` | The listing window, and the four surfaces it does and does not touch. |
 | `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
+| `test/listing-stale.test.mjs` | The listing-staleness check, and its refusal cases. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
-| `.github/workflows/publish-on-blogs-update.yml` | Scheduled drift check. Dispatches `pages.yml` when the store moves. |
+| `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over. |
 | `.github/workflows/gate.yml` | The same check on every pull request. |
 
 ## URLs
@@ -266,6 +385,33 @@ or the live site was not serving, or the live site predates the `contentHead`
 field. That is a failure and the scheduled run goes red on it. It is never
 read as "nothing to do", because a silent no-op is the failure this whole
 mechanism exists to prevent.
+
+### The listing rolls without a commit
+
+The front page is a rolling listing, so it also needs a publish on days when
+nobody commits anything. `publish-on-blogs-update.yml` runs two checks on its
+fifteen-minute schedule, because the site can be behind for two unrelated reasons:
+
+1. `check-blogs-ahead.mjs` — the markdown store moved. Compares the store's `main`
+   against the `contentHead` the live site reports.
+2. `check-listing-stale.mjs` — the newsroom day moved. Compares
+   `listing.newsroomToday` the live site reports against the day in
+   `America/New_York` now.
+
+Either one dispatches `pages.yml`, through a single dispatch job, so a morning
+that is both behind on content and a day old in the listing still spends one
+deploy. `pages.yml` remains the only thing in this repository that builds or
+deploys.
+
+Without the second check the failure is quiet and easy to miss: on a day when
+nothing was filed, the store head matches the published head, the drift check
+exits 0, and the front page keeps serving yesterday's edition to every reader who
+came for the 06:00 one. Nothing is red anywhere.
+
+```
+node scripts/check-blogs-ahead.mjs      # 0 current, 1 behind, 2 could not tell
+node scripts/check-listing-stale.mjs    # 0 current, 1 stale, 2 could not tell
+```
 
 ### Hosting
 
