@@ -36,6 +36,19 @@ jobs:
       - name: Sync blogs repository
         run: node scripts/sync-content.mjs --from-github EasySchedule/belmont-news-blogs@main
 
+      # The tests run here, on the publish path, not only on pull requests.
+      #
+      # gate.yml is pull_request-only, so before this step the renderer's tests
+      # never touched a publish at all: a renderer that drops every source name
+      # would merge and deploy with nothing red anywhere, which is exactly the
+      # failure that shipped "Document ." to every reader. Branch protection on
+      # main makes that a blocked merge; this step makes it a blocked deploy,
+      # so the hole is closed even if the ruleset is bypassed or the app
+      # permissions that manage it are lost. Same command as gate.yml, run on
+      # the same synced tree the build is about to render.
+      - name: Renderer tests
+        run: node --test
+
       # The gate runs inside the build. An unsourced post fails here and never
       # reaches the deploy step.
       #
