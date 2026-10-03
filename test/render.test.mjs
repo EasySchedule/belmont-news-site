@@ -40,12 +40,12 @@ const SOURCES = [
   '    retrieved: 2026-10-02',
 ].join('\n');
 
-function render(frontMatter, slug = 'belmont-county-three-day-weather-roundup') {
+function render(frontMatter, slug = 'belmont-county-three-day-weather-roundup', body = '## The roundup\n\nRain tonight, then a dry weekend.\n') {
   const root = mkdtempSync(join(tmpdir(), 'belmont-site-'));
   try {
     const file = join(root, 'content', '2026', '10', '2026-10-02', `nathan-beausoleil--${slug}.md`);
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `---\n${frontMatter}\n---\n\n## The roundup\n\nRain tonight, then a dry weekend.\n`);
+    writeFileSync(file, `---\n${frontMatter}\n---\n\n${body}`);
     try {
       const stdout = execFileSync('node', [BUILD, '--content', join(root, 'content'), '--out', join(root, 'dist'), '--site-url', 'https://example.test'], {
         cwd: root,
@@ -107,6 +107,54 @@ test('each list item is its own source, not the first one repeated', () => {
   const s = sourcesSection(r.html);
   for (const t of ['First', 'Second', 'Third', 'Fourth']) assert.match(s, new RegExp(t));
   assert.equal((s.match(/<li>/g) || []).length, 4);
+});
+
+// --------------------------------------------------- the reader sees numbers
+//
+// These fail on main. The renderer parked inline-code spans as bare numeric
+// indexes and restored them by replacing every digit run in the document, so
+// every figure in every article printed as the word "undefined". A reader got
+// "the undefined -hour public access" and "BEL- undefined ." Nothing in the
+// suite asserted on a numeral reaching the page, which is how it shipped.
+
+const NUMBERS_BODY = [
+  '## The roundup',
+  '',
+  'It carries the 58,281 names. The grounds are open 24 hours today and the',
+  'closing ceremony starts at 1:45 p.m. on 2026-10-04. The street number is',
+  '45420, and the exhibit closes at 2 p.m.',
+  '',
+  "The committee's published schedule sets the times, and Route 40 carries the",
+  'detour. Build it with `npm run build` before you push.',
+].join('\n');
+
+test('numbers in the body reach the page as written', () => {
+  const r = render(`${FRONT}\n${SOURCES}`, undefined, NUMBERS_BODY);
+  assert.equal(r.code, 0, r.stderr);
+  for (const n of ['58,281', '24 hours', '1:45 p.m.', '2026-10-04', '45420', '2 p.m.', 'Route 40']) {
+    assert.match(r.html, new RegExp(n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${n} must reach the reader`);
+  }
+});
+
+test('no figure anywhere on the page degrades to the word undefined', () => {
+  const r = render(`${FRONT}\n${SOURCES}`, undefined, NUMBERS_BODY);
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.html, /undefined/, 'no numeral may render as undefined');
+  assert.match(r.html, /committee&#39;s published schedule sets the times/);
+});
+
+test('inline code still renders as code, and keeps its contents verbatim', () => {
+  const r = render(`${FRONT}\n${SOURCES}`, undefined, NUMBERS_BODY);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<code>npm run build<\/code>/);
+  assert.doesNotMatch(r.html, /<code>undefined<\/code>/);
+});
+
+test('inline code around digits is not confused with a bare number', () => {
+  const body = ['## The roundup', '', 'Seven `2` and `12` and a bare 42 in the same line.', ''].join('\n');
+  const r = render(`${FRONT}\n${SOURCES}`, undefined, body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /Seven <code>2<\/code> and <code>12<\/code> and a bare 42/);
 });
 
 // ------------------------------------------------------ and never a blank one

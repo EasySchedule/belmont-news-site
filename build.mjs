@@ -89,10 +89,17 @@ const esc = (s) => String(s)
 function inline(src) {
   let s = esc(src);
   // inline code first so its contents escape nothing else
+  //
+  // The placeholder is wrapped in NUL, not a bare index. A bare index is
+  // indistinguishable from a number the author wrote, and restoring it by
+  // matching digits therefore matched every number in the article and printed
+  // codes[<number>] for each one. That is how every figure on the site came
+  // out as the word "undefined". Nothing esc() emits can contain NUL, so the
+  // two can never collide.
   const codes = [];
   s = s.replace(/`([^`]+)`/g, (_, c) => {
     codes.push(c);
-    return `${codes.length - 1}`;
+    return `\u0000${codes.length - 1}\u0000`;
   });
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) => {
     const safe = /^(https?:\/\/|\/|#|mailto:)/.test(href) ? href : '#';
@@ -101,8 +108,7 @@ function inline(src) {
   });
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  s = s.replace(/(\d+)/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
-  return s;
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
 }
 
 function splitRow(line) {
