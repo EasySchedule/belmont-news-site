@@ -63,9 +63,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
+  # Two independent reasons the published site can be behind, and they need two
+  # separate checks because they fail on different triggers.
+  #
+  #   drift    the markdown store moved. Caught by comparing the store's main
+  #            against the commit the live site says it rendered.
+  #
+  #   listing  the newsroom day moved. The front page is a rolling listing now, so
+  #            it ages out posts on a day when nobody writes anything and no
+  #            commit happens. Caught by comparing the day the live listing was
+  #            built for against the day in America/New_York now.
+  #
+  # Either one dispatches pages.yml, once, through a single dispatch job. Two jobs
+  # each dispatching on their own would race and could spend two deploys on the
+  # same quiet morning.
+  drift:
     name: Is the published site behind the store?
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.drift.outputs.publish }}
+      exit: ${{ steps.drift.outputs.exit }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +97,7 @@ jobs:
       # The 1 and 2 outcomes are deliberately different steps. exit 1 is the
       # normal path and must not be able to hide a failure behind it, so the
       # drift check gets its own step and a red check never reaches the
-      # dispatch below.
+      # dispatch job below.
       - name: Check for drift
         id: drift
         run: |
@@ -95,30 +112,97 @@ jobs:
             *) echo "publish=false" >> "$GITHUB_OUTPUT"; exit "$code" ;;
           esac
 
+  listing:
+    name: Is the front page showing an earlier newsroom day?
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.listing.outputs.publish }}
+      exit: ${{ steps.listing.outputs.exit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Same three exit codes as the drift check, with the same meaning.
+      #
+      # This one has to exist. Without it a quiet newsroom day, where the store
+      # did not move and nothing was committed, would produce no publish at all
+      # and the front page would sit there showing yesterday's edition to
+      # everybody who came for the 06:00 one. That is the same silent non-publish
+      # this workflow already exists to prevent, arrived at from a new direction.
+      - name: Check the listing day
+        id: listing
+        run: |
+          set +e
+          node scripts/check-listing-stale.mjs
+          code=$?
+          set -e
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "publish=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "publish=false" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+
+  dispatch:
+    name: Publish
+    needs: [drift, listing]
+    # `always()` so one loud failure does not silently cancel the other reason to
+    # publish. A red drift check still has to let a stale listing be republished,
+    # or a probe that cannot reach the store would quietly freeze the front page
+    # as well as the content. Which reasons applied is in the step summary.
+    if: always() && (needs.drift.result == 'success' || needs.listing.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
       # pages.yml is the only thing that builds or deploys. This dispatch is
       # the same `gh workflow run pages.yml --ref main` the newsroom ran by
       # hand for the Wall That Heals story, which is the point: the manual step
       # becomes the scheduled step, unchanged, so there is still exactly one
       # publish path and nothing to document twice.
+      #
+      # Both checks run here rather than in their own jobs so that a day that is
+      # both behind on content and a day old in the listing still spends one
+      # deploy.
       - name: Dispatch the publish
-        if: steps.drift.outputs.publish == 'true'
+        if: needs.drift.outputs.publish == 'true' || needs.listing.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          DRIFT: ${{ needs.drift.outputs.publish }}
+          LISTING: ${{ needs.listing.outputs.publish }}
         run: |
+          echo "drift=${DRIFT} listing=${LISTING}"
           gh workflow run pages.yml --ref main
-          echo "dispatched pages.yml for the current store head"
+          echo "dispatched pages.yml"
 
-      - name: Report
-        if: always()
+  report:
+    name: Report
+    needs: [drift, listing]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarise
         run: |
           {
-            echo "### Blogs publish check"
+            echo "### Publish check"
             echo
-            if [ "${{ steps.drift.outputs.publish }}" = "true" ]; then
-              echo "The markdown store is ahead of the published site. Dispatched pages.yml."
-            elif [ "${{ steps.drift.outputs.exit }}" = "0" ]; then
-              echo "The published site already renders the current store head. Nothing to do."
+            if [ "${{ needs.drift.outputs.exit }}" == "1" ]; then
+              echo "- The markdown store is ahead of the published site."
+            elif [ "${{ needs.drift.outputs.exit }}" == "0" ]; then
+              echo "- The published site already renders the current store head."
             else
-              echo "Could not determine whether the site is current. This run is red on purpose; see the step log."
+              echo "- **Could not determine whether the content is current.** drift exit \`${{ needs.drift.outputs.exit }}\`. This run is red on purpose; see the step log."
+            fi
+            if [ "${{ needs.listing.outputs.exit }}" == "1" ]; then
+              echo "- The front page listing was built for an earlier newsroom day."
+            elif [ "${{ needs.listing.outputs.exit }}" == "0" ]; then
+              echo "- The front page listing is current for today in America/New_York."
+            else
+              echo "- **Could not determine whether the listing is current.** listing exit \`${{ needs.listing.outputs.exit }}\`. This run is red on purpose; see the step log."
+            fi
+            echo
+            if [ "${{ needs.drift.outputs.publish }}" == "true" ] || [ "${{ needs.listing.outputs.publish }}" == "true" ]; then
+              echo "Dispatched \`pages.yml\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

@@ -11,8 +11,9 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'node:fs';
 import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NEWSROOM_TZ, publicationInstant, buildEpochMs } from './scripts/dates.mjs';
+import { NEWSROOM_TZ, publicationInstant, buildEpochMs, calendarDay } from './scripts/dates.mjs';
 import { readCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
+import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, partition } from './scripts/expiry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,11 @@ Usage: node build.mjs [options]
   --build-epoch <unix-seconds>  when this build shipped (default SOURCE_DATE_EPOCH,
                                 else the wall clock). Caps every feed timestamp,
                                 so no item is ever dated in the future.
+  --newsroom-today <YYYY-MM-DD>  the newsroom day the listing window is judged
+                                against (default: the America/New_York date now).
+                                Pins the rolling listing for a reproducible build.
+  --listing-days <n>  newsroom days a post stays on the front page and in
+                      feed.xml, counting its own day (default ${DEFAULT_LISTING_DAYS}).
   --check           validate only, write nothing
   --help            this text
 
@@ -39,13 +45,17 @@ Environment:
                       emitted at all. The build never fails on a missing key and
                       never hard-codes one.
   SOURCE_DATE_EPOCH    Same meaning as --build-epoch. CI sets it from the commit
-                      being deployed so a build is reproducible from Git.
+                      being deployed so a build is reproducible from Git. It does
+                      NOT drive the listing window: it is the commit's time, not
+                      the build's, and using it would freeze the listing on the
+                      day of the last commit rather than rolling it. See
+                      --newsroom-today.
   TZ_FOR_DATES         Time zone for publication instants (default
                       ${NEWSROOM_TZ}). Named, never a numeric offset.
 `;
 
 function parseArgs(argv) {
-  const o = { content: 'content', corrections: 'corrections', out: 'dist', baseUrl: '/', siteUrl: 'http://localhost:8080', title: 'Belmont News', buildEpoch: null, check: false };
+  const o = { content: 'content', corrections: 'corrections', out: 'dist', baseUrl: '/', siteUrl: 'http://localhost:8080', title: 'Belmont News', buildEpoch: null, newsroomToday: null, listingDays: DEFAULT_LISTING_DAYS, check: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => {
@@ -62,6 +72,8 @@ function parseArgs(argv) {
     else if (a === '--site-url') o.siteUrl = val().replace(/\/$/, '');
     else if (a === '--title') o.title = val();
     else if (a === '--build-epoch') o.buildEpoch = val();
+    else if (a === '--newsroom-today') o.newsroomToday = val();
+    else if (a === '--listing-days') o.listingDays = Number(val());
     else if (a === '--check') o.check = true;
     else if (a === '--help') { process.stdout.write(USAGE); process.exit(0); }
     else {
@@ -73,6 +85,13 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv.slice(2));
+
+if (opts.newsroomToday !== null && !/^\d{4}-\d{2}-\d{2}$/.test(opts.newsroomToday.trim())) {
+  fail(`--newsroom-today must be a plain YYYY-MM-DD day, got ${JSON.stringify(opts.newsroomToday)}`);
+}
+if (!Number.isInteger(opts.listingDays) || opts.listingDays < 1) {
+  fail(`--listing-days must be a whole number of at least 1, got ${JSON.stringify(opts.listingDays)}`);
+}
 
 // ------------------------------------------------------------- escaping
 
@@ -330,10 +349,53 @@ const posts = files.map((f) => {
     const named = s && typeof s === 'object' && !Array.isArray(s) && String(s.title || '').trim();
     if (!named) fail(`${rel}: sources[${i}] has no title. A source the reader cannot name does not publish.`);
   });
+  // A malformed or already-elapsed `expires` stops the build here rather than
+  // being ignored downstream. Ignoring it is how a post ends up listed forever,
+  // which is the exact defect this rule was added to remove.
+  const badExpiry = expiryError(data, rel);
+  if (badExpiry) fail(badExpiry);
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 
 posts.sort((a, b) => (b.fm.date || '').localeCompare(a.fm.date || '') || (a.fm.slug).localeCompare(b.fm.slug));
+
+// ------------------------------------------------------- listing expiry
+//
+// Three surfaces read the post set and each applies its own rule:
+//
+//   homePage()  the rolling root listing. Expired posts drop off it.
+//   feedItems   feed.xml. Expired items drop out of it.
+//   sitemap()   every post, expired or not. See the note on that function.
+//
+// The post's OWN page is written for every post regardless, and every post is
+// rendered and copied whether or not it is listed. Expiry is a recency rule for
+// a listing. It is not a withdrawal, it is not a correction, and it does not
+// make any post's copy true: the desk gate item ruled on BEL-87 owns that and
+// this does not substitute for it.
+//
+// The newsroom day is read from the wall clock, deliberately, and never from
+// SOURCE_DATE_EPOCH. CI sets SOURCE_DATE_EPOCH from the commit being deployed, so
+// a scheduled rebuild dispatched with no new commit would judge the window
+// against the day of the last commit and the front page would stop rolling
+// entirely. --newsroom-today pins it so a build can be reproduced and audited.
+const NEWSROOM_TODAY = (opts.newsroomToday || calendarDay(Date.now(), NEWSROOM_TZ)).trim();
+
+const { listed: listedPosts, expired: expiredPosts } = partition(posts, {
+  today: NEWSROOM_TODAY,
+  days: opts.listingDays,
+});
+
+// A front page with nothing on it is not a quiet outcome, it is the worst one.
+// It happens when the archive has a gap wider than the window, for instance if
+// nothing is filed over a holiday weekend. The listing falls back to the newest
+// posts so the page a reader lands on still shows news, and the build says so
+// loudly on stderr and in build-info.json. It does not fail the deploy: stopping
+// publication because a listing would be empty is a worse outcome than showing a
+// slightly older story, and the gate already refuses to publish a site with no
+// posts at all.
+const listingWindowEmpty = listedPosts.length === 0;
+const fallbackPosts = listingWindowEmpty ? posts.slice(0, opts.listingDays) : [];
+const listing = listingWindowEmpty ? fallbackPosts : listedPosts;
 
 // ------------------------------------------------------------ corrections
 
@@ -531,8 +593,17 @@ ${markdown(p.body)}
   });
 }
 
+// The rolling root listing. It renders `listing`, not `posts`: a post that has
+// aged out is no longer "Latest", so it is no longer a card here. Its own page
+// still exists, and it is still in sitemap.xml, so nothing a reader can reach
+// disappears and nothing a search engine was promised is withdrawn.
+//
+// The heading says "Latest" either way. When the window came up empty and the
+// fallback filled the page, the build warns on stderr and records
+// `listing.fallback` in build-info.json rather than putting a caveat on the front
+// page of a newspaper.
 function homePage() {
-  const cards = posts.map((p) => `
+  const cards = listing.map((p) => `
   <article class="card">
     <p class="kicker">${esc(EDITION_LABEL[p.fm.edition] || p.fm.edition || 'News')}${p.fm.column ? ` · ${esc(p.fm.column)}` : ''} · <time datetime="${esc(p.fm.date)}">${esc(p.fm.date)}</time></p>
     <h2><a href="${esc(key(p.url))}">${esc(p.fm.title)}</a></h2>
@@ -564,7 +635,21 @@ ${cards}
 // until 2026-11-01 and wrong forever after. The instant is resolved against the
 // America/New_York tz database at build time, so the EST change is a tzdata
 // update and not a code change.
-const feedItems = posts
+// The feed carries the listed posts only. Two things are true about dropping an
+// item and both belong in the same comment, because the second is the one that
+// gets over-claimed:
+//
+//   1. The feed stops advertising it. A reader arriving by feed sees the last two
+//      news days, not everything the archive has ever held.
+//   2. This is not a retraction and cannot be. RSS 2.0 has no way to withdraw an
+//      item, and this feed's `guid` is the permalink, which does not change. A
+//      reader's reader has already fetched any item it drops here and will keep
+//      it. Dropping the item from the forward-looking feed takes nothing away
+//      from anyone who already has it.
+//
+// The page itself is untouched, so the permalink in every already-delivered guid
+// still resolves.
+const feedItems = listing
   .map((p) => ({ post: p, publishedAt: publicationInstant(p.fm, SHIPPED_AT, NEWSROOM) }))
   .sort((a, b) => b.publishedAt - a.publishedAt
     || (b.post.fm.date || '').localeCompare(a.post.fm.date || '')
@@ -595,6 +680,26 @@ ${items}
 `;
 }
 
+// The sitemap lists every post, listed or not. It is the one surface of the four
+// that the expiry rule deliberately does not touch, and the reasoning is worth
+// keeping next to the code:
+//
+// A `sitemap.xml` entry is a standing claim to a search engine that this URL is
+// current and worth indexing. Ageing a front-page listing is not a statement
+// about the page, so withdrawing the sitemap entry would be a different act than
+// the one this rule performs. Yesterday's three-day weather roundup is still the
+// correct answer to "what was the forecast yesterday?", and deindexing it would
+// destroy that answer for no reader benefit.
+//
+// There is also a hard fact underneath the judgment. GitHub Pages is the live
+// host, and it cannot emit HTTP 410: it serves 301 and 302 and nothing else. So
+// a build that withdrew expired pages could not honour the withdrawal on the
+// host the site actually runs on, and promising a 410 the host cannot keep is
+// the same lie as the 404 this is avoiding, with a more respectable status code.
+//
+// If the desk later rules that expired pages are withdrawn rather than aged out,
+// that is a new issue and it needs a mechanism decided there: this host's
+// redirect story, and whether a withdrawn URL is served a 404 body or moved.
 function sitemap() {
   const urls = [
     { loc: abs(''), lastmod: '' },
@@ -614,7 +719,11 @@ ${urls}
 
 if (opts.check) {
   process.stdout.write(`build.mjs: ${posts.length} post(s) valid, nothing written (--check)\n`);
-  for (const p of posts) process.stdout.write(`build.mjs:   ${p.url}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+  process.stdout.write(`build.mjs: newsroom today ${NEWSROOM_TODAY}, listing window ${opts.listingDays} day(s), ${listing.length} listed, ${expiredPosts.length} expired\n`);
+  for (const p of posts) {
+    const mark = p.listing.listed ? 'listed  ' : `expired ${p.listing.expires}`;
+    process.stdout.write(`build.mjs:   ${mark}  ${p.url}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+  }
   if (corrections.logs.length) {
     process.stdout.write(`build.mjs: ${corrections.logs.length} corrections log(s) valid\n`);
     for (const log of corrections.logs) {
@@ -683,6 +792,20 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
   contentSyncedAt: synced.syncedAt,
   posts: posts.length,
   contentFiles: files.length,
+  // The listing window this build judged against. `newsroomToday` is what the
+  // scheduled staleness check in scripts/check-listing-stale.mjs reads: it is
+  // the field that lets the front page roll on a day when nothing was committed.
+  // Without it the listing would only ever move when someone happened to push.
+  listing: {
+    newsroomToday: NEWSROOM_TODAY,
+    windowDays: opts.listingDays,
+    listed: listing.length,
+    expired: expiredPosts.length,
+    fallback: listingWindowEmpty,
+    // Every post stays rendered and stays in the sitemap whatever it says here.
+    // This block records the listing decision and nothing else.
+    expiredUrls: expiredPosts.map((p) => `/${p.url}`),
+  },
   correctionsDir: relative(HERE, corrections.dir),
   correctionsFiles: corrections.logs.length,
   corrections: corrections.logs.map((log) => ({
@@ -707,6 +830,15 @@ try {
 
 process.stdout.write(`build.mjs: built ${posts.length} post(s) into ${opts.out}\n`);
 for (const p of posts) process.stdout.write(`build.mjs:   ${key(p.url)}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+process.stdout.write(`build.mjs: listing ${listing.length} listed, ${expiredPosts.length} expired, newsroom day ${NEWSROOM_TODAY}, window ${opts.listingDays} day(s)\n`);
+for (const p of expiredPosts) process.stdout.write(`build.mjs:   expired ${p.listing.expires} (${p.listing.from})  ${key(p.url)}\n`);
+if (listingWindowEmpty) {
+  process.stderr.write(
+    `build.mjs: WARNING no post is inside the ${opts.listingDays}-day listing window for newsroom day ${NEWSROOM_TODAY}.\n`
+    + `build.mjs: WARNING the front page is showing the ${fallbackPosts.length} newest post(s) as a fallback.\n`
+    + 'build.mjs: WARNING every post page and every sitemap entry is unaffected. The archive is the record.\n',
+  );
+}
 process.stdout.write(`build.mjs: corrections ${corrections.logs.length ? `${corrections.logs.length} log(s), ${corrections.logs.reduce((n, l) => n + l.entries.length, 0)} entry(ies) at ${key(correctionsIndexUrl)}` : `none found under ${relative(process.cwd(), corrections.dir)}`}\n`);
 process.stdout.write(`build.mjs: feed clock ${new Date(SHIPPED_AT).toUTCString()} ${NEWSROOM}, no item dated later\n`);
 process.stdout.write(`build.mjs: analytics ${posthogKey ? 'enabled' : 'disabled (PUBLIC_POSTHOG_KEY unset)'}\n`);
