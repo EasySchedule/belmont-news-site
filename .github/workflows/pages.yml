@@ -43,9 +43,15 @@ jobs:
       # are a function of Git rather than of the minute the runner happened to
       # start. It is also the ceiling on every pubDate, which is what keeps an
       # edition filed ahead of its publication day out of the future.
+      #
+      # It has to be exported into this step, not appended to $GITHUB_ENV: a
+      # variable written to $GITHUB_ENV reaches the *next* step, not the rest of
+      # this one, so the build would silently fall back to the wall clock. The
+      # echo below is the check that catches that.
       - name: Build
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH"))"
           npm run build
 
       - uses: actions/configure-pages@v5
