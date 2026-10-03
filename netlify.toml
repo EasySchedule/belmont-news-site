@@ -7,8 +7,15 @@
 # deploy to production with no red check anywhere in the run. A failed build
 # leaves the last good deploy live, which is the outcome we want.
 
+# The markdown store is the source of truth, and it lives in a different
+# repository. pages.yml already pulls it at build time, so a blog commit
+# publishes without touching this repository. Without the same step here, this
+# build renders the committed copy of `content/` instead: 4 posts against the 5
+# the Pages build serves, and a post that is live on one host is a 404 on the
+# other. Same anonymous public clone on both paths, no credential needed.
+
 [build]
-  command = "npm test && npm run build"
+  command = "node scripts/sync-content.mjs --from-github EasySchedule/belmont-news-blogs@main && npm test && npm run build"
   publish = "dist"
 
 [build.environment]
