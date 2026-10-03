@@ -634,9 +634,29 @@ writeFileSync(join(outDir, '404.html'), shell({
   canonical: abs('404.html'),
 }));
 
-// The build report carries the corrections file by name and the exact feed
-// timestamps it emitted, so a reporter checking the live site can see what this
-// build read and what it published without reading a build log.
+// The commit of the markdown store this build rendered, read from the manifest
+// sync-content.mjs writes. It is the one field that answers "is the live site
+// current?", which is the question a blogs merge leaves open: the store is the
+// source of truth and this repository is not, so a merge lands here without
+// touching Git history anywhere an operator would look.
+//
+// The manifest is rewritten by every sync and never committed back, so this is
+// the value for the content in this build and not a stale snapshot of it. A
+// build from a plain directory with no manifest beside it reports null, which
+// reads as "unknown" rather than as a claim that it is current.
+const synced = (() => {
+  try {
+    const m = JSON.parse(readFileSync(join(HERE, '.content-synced.json'), 'utf8'));
+    return { source: m.source ?? null, head: m.sourceHead ?? null, syncedAt: m.syncedAt ?? null };
+  } catch {
+    return { source: null, head: null, syncedAt: null };
+  }
+})();
+
+// The build report carries the corrections file by name, the exact feed
+// timestamps it emitted, and the markdown commit it rendered, so a reporter
+// checking the live site can see what this build read and what it published
+// without reading a build log.
 writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
   generated: new Date().toISOString(),
   buildEpoch: SHIPPED_AT,
@@ -644,6 +664,9 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
   siteTitle: opts.title,
   siteUrl: opts.siteUrl,
   posthogEnabled: Boolean(posthogKey),
+  contentSource: synced.source,
+  contentHead: synced.head,
+  contentSyncedAt: synced.syncedAt,
   posts: posts.length,
   contentFiles: files.length,
   correctionsDir: relative(HERE, corrections.dir),

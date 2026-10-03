@@ -181,11 +181,14 @@ corrections-log parser to the newsroom's format.
 | `corrections/` | Synced copy of the corrections log. Not edited here. |
 | `static/styles.css` | The only stylesheet. Print-first, dark-mode aware, no webfont. |
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
+| `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
+| `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
-| `.github/workflows/pages.yml` | GitHub Pages publish on every push to `main`. |
+| `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
+| `.github/workflows/publish-on-blogs-update.yml` | Scheduled drift check. Dispatches `pages.yml` when the store moves. |
 | `.github/workflows/gate.yml` | The same check on every pull request. |
 
 ## URLs
@@ -208,6 +211,65 @@ Check `/build-info.json` on the deployed site to see whether analytics is on.
 
 ## Publishing
 
-Push to `main`. GitHub Pages publishes. Netlify deploys the same `dist` from the
-same command, so the two hosts render identical HTML. A failing gate stops both,
-because the gate runs before the upload step.
+**The live host is GitHub Pages**, at
+<https://easyschedule.github.io/belmont-news-site>. That is the URL the
+newsroom verifies. Netlify is configured in `netlify.toml` and builds the same
+`dist/` from the same command, but it is not deployed and its host returns 404,
+so nothing in the publish path depends on it. See "Hosting" below.
+
+Push to `main` and `pages.yml` publishes. That workflow is the only thing in
+this repository that builds or deploys; every other route into publishing ends
+by dispatching it.
+
+### A blogs merge publishes the site
+
+The markdown store is a different repository, so a merge to
+`belmont-news-blogs` `main` does not push this one and does not fire `pages.yml`
+on its own. That gap is closed by `publish-on-blogs-update.yml`, which runs
+every 15 minutes:
+
+1. `build.mjs` stamps the store commit it rendered into `/build-info.json`, so
+   the published site can say what it is built from.
+2. The workflow compares that against the store's current `main`.
+3. If they differ, it dispatches `pages.yml`, which rebuilds and redeploys. If
+   they match, it does nothing and no deploy is spent.
+
+So a correct merge to the store publishes within about fifteen minutes without
+anyone remembering to. Check it at any time:
+
+```
+curl -s https://easyschedule.github.io/belmont-news-site/build-info.json | grep contentHead
+git ls-remote https://github.com/EasySchedule/belmont-news-blogs.git refs/heads/main
+```
+
+Those two agree when the site is current.
+
+The same check runs by hand, which is what to use when a merge has just landed
+and the wait is too long:
+
+```
+node scripts/check-blogs-ahead.mjs        # 0 current, 1 behind, 2 could not tell
+gh workflow run pages.yml --ref main
+```
+
+Exit code 2 means the question could not be answered: the store was unreachable,
+or the live site was not serving, or the live site predates the `contentHead`
+field. That is a failure and the scheduled run goes red on it. It is never
+read as "nothing to do", because a silent no-op is the failure this whole
+mechanism exists to prevent.
+
+### Hosting
+
+Two hosts are configured and only one is live.
+
+| Host | State | URL |
+|---|---|---|
+| GitHub Pages | **Live. The verified publish path.** | `https://easyschedule.github.io/belmont-news-site` |
+| Netlify | Configured in `netlify.toml`, not deployed, returns 404 | `https://belmont-news.netlify.app` |
+
+Both run `npm run build` and publish `dist/`, so they render identical HTML.
+Until Netlify is deployed and its URL is verified, GitHub Pages is production
+and `pages.yml` is the publish path. Do not describe a Netlify deploy as done.
+
+A failing gate stops both, because the gate runs before the upload step.
+

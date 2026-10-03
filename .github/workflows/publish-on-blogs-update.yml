@@ -1,0 +1,124 @@
+# Publish the site when the markdown store moves on.
+#
+# This is the durable trigger BEL-74 asked for. The problem it fixes: pages.yml
+# fires on a push to THIS repository, and the markdown store is a different
+# repository. So a correct merge to belmont-news-blogs main published nothing,
+# failed nothing, and left the reader on a 404 until somebody separately
+# remembered to publish. A silent non-publish is the whole defect.
+#
+# How it works. build.mjs stamps the store commit it rendered into
+# /build-info.json, so "is the published site current?" is a lookup rather than
+# an inference. This workflow asks that question on a schedule and dispatches
+# pages.yml when the answer is no. pages.yml stays the single publish path: this
+# file never builds and never deploys, it only decides whether to ask
+# pages.yml to run, and the renderer tests and the sourcing gate still run
+# inside pages.yml exactly as before.
+#
+# Why a schedule and not repository_dispatch. BEL-18 section 7.3 asks for a
+# cross-repository trigger, and this is the same idea, but the two mechanisms
+# that implement it need something this newsroom does not have:
+#
+#   repository_dispatch  needs a credential in belmont-news-blogs that can
+#                        write to belmont-news-site. There are no secrets in
+#                        either repository, and minting a cross-repo token is a
+#                        credential decision, not a build change.
+#   workflow_run         needs the same cross-repo read, for the same reason.
+#
+# Both also only work if the blogs side is changed and re-deployed in step with
+# this side, so the trigger would live in two repositories and break whenever
+# one moved. This needs no token at all: the store is public and the deployed
+# site is public, so both reads are anonymous. That is also what lets it run on
+# a schedule in a repository that holds no credentials.
+#
+# What it costs. A scheduled run every 15 minutes, and a publish only when the
+# store has actually moved, so the common run is two cheap anonymous reads and
+# no deploy. GitHub disables scheduled workflows on a repository with no
+# activity for 60 days; this repository publishes twice a day.
+#
+# When the store cannot be reached, or the live site will not say what it
+# rendered, check-blogs-ahead.mjs exits 2 and this workflow goes red. That is
+# deliberate. The failure being fixed is silence, so a probe that cannot answer
+# must be loud rather than read as "nothing to do".
+
+name: Publish on blogs update
+
+on:
+  schedule:
+    # Every 15 minutes. The newsroom publishes 06:00 and 20:00, so the gap
+    # between an edition being merged and a reader seeing it is minutes, not
+    # hours. GitHub queues scheduled runs and they can be delayed under load;
+    # a missed window is caught by the next one.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Dispatching pages.yml in this repository needs actions: write. This is the
+  # repository's own GITHUB_TOKEN, scoped to this repository by the platform.
+  # It is not a stored credential and there is nothing to rotate or leak.
+  actions: write
+
+concurrency:
+  group: publish-on-blogs-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Is the published site behind the store?
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # exit 0  site is current, nothing to do
+      # exit 1  site is behind, publish it
+      # exit 2  could not tell, and that is a failure, not a quiet no-op
+      #
+      # The 1 and 2 outcomes are deliberately different steps. exit 1 is the
+      # normal path and must not be able to hide a failure behind it, so the
+      # drift check gets its own step and a red check never reaches the
+      # dispatch below.
+      - name: Check for drift
+        id: drift
+        run: |
+          set +e
+          node scripts/check-blogs-ahead.mjs
+          code=$?
+          set -e
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "publish=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "publish=false" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+
+      # pages.yml is the only thing that builds or deploys. This dispatch is
+      # the same `gh workflow run pages.yml --ref main` the newsroom ran by
+      # hand for the Wall That Heals story, which is the point: the manual step
+      # becomes the scheduled step, unchanged, so there is still exactly one
+      # publish path and nothing to document twice.
+      - name: Dispatch the publish
+        if: steps.drift.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run pages.yml --ref main
+          echo "dispatched pages.yml for the current store head"
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "### Blogs publish check"
+            echo
+            if [ "${{ steps.drift.outputs.publish }}" = "true" ]; then
+              echo "The markdown store is ahead of the published site. Dispatched pages.yml."
+            elif [ "${{ steps.drift.outputs.exit }}" = "0" ]; then
+              echo "The published site already renders the current store head. Nothing to do."
+            else
+              echo "Could not determine whether the site is current. This run is red on purpose; see the step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
