@@ -1,9 +1,14 @@
 # Belmont News on Netlify. Free tier.
 # Build command and publish directory are the only two settings a deploy needs;
 # the rest are guardrails so a broken build never replaces a good site.
+#
+# `npm test` first is a guardrail, not a courtesy. gate.yml only runs on pull
+# requests, so without it a renderer that renders nothing a reader can see would
+# deploy to production with no red check anywhere in the run. A failed build
+# leaves the last good deploy live, which is the outcome we want.
 
 [build]
-  command = "npm run build"
+  command = "npm test && npm run build"
   publish = "dist"
 
 [build.environment]

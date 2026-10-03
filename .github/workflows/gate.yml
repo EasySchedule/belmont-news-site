@@ -49,5 +49,11 @@ jobs:
       # A source the reader cannot see is a failed publish. The gate above only
       # checks that a post has a non-empty sources list, which a broken parser
       # satisfies while printing nothing. These tests read the rendered HTML.
+      #
+      # The whole test directory, not one file. Naming render.test.mjs here left
+      # test/build.test.mjs with no workflow at all, while its own header claimed
+      # "`npm test` runs this on every pull request". A test file that nothing
+      # executes is the same hole as a gate that reads nothing, so this is
+      # deliberately the same command a developer runs locally.
       - name: node --test
-        run: node --test test/render.test.mjs
+        run: node --test

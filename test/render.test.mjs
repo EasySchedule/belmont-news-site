@@ -9,9 +9,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,19 +156,30 @@ test('a post missing its byline stops the build', () => {
 test('every post in the committed content snapshot names its sources', () => {
   const out = mkdtempSync(join(tmpdir(), 'belmont-real-'));
   try {
+    // Walk the committed snapshot instead of naming today's posts. A hardcoded
+    // list and a hardcoded count both rot on the next publish, and this test now
+    // runs on the publish path too: a fifth post would have failed the deploy
+    // over a stale number rather than over anything a reader would see.
+    const markdown = [];
+    (function walk(dir) {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.md')) markdown.push(p);
+      }
+    })(join(REPO, 'content'));
+    assert.ok(markdown.length > 0, 'the committed snapshot has no posts in it');
+
     const stdout = execFileSync('node', [BUILD, '--content', 'content', '--out', out, '--site-url', 'https://example.test'], {
       cwd: REPO,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    assert.match(stdout, /built 4 post\(s\)/);
-    const pages = [
-      '2026-10-02/belmont-county-three-day-weather-roundup',
-      '2026-10-02/morning-briefing-2026-10-02-evening',
-      '2026-10-03/morning-briefing-2026-10-03',
-      '2026-10-03/wall-that-heals-last-chance-lead-recommendation',
-    ];
-    for (const p of pages) {
+    assert.match(stdout, new RegExp(`built ${markdown.length} post\\(s\\)`));
+    for (const file of markdown) {
+      // content/YYYY/MM/YYYY-MM-DD/author--slug.md renders to YYYY-MM-DD/slug.
+      const parts = file.split(sep);
+      const p = `${parts[parts.length - 2]}/${parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')}`;
       const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
       const s = sourcesSection(html);
       assert.notEqual(s, '', `${p} rendered no sources section at all`);
