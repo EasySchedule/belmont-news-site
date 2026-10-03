@@ -8,7 +8,7 @@
 # leaves the last good deploy live, which is the outcome we want.
 
 [build]
-  command = "npm test && npm run build"
+  command = "node scripts/sync-content.mjs --from-github EasySchedule/belmont-news-blogs@main && export SOURCE_DATE_EPOCH=\"$(git log -1 --format=%ct)\" && npm test && npm run build"
   publish = "dist"
 
 [build.environment]
