@@ -61,6 +61,15 @@ function isDir(p) {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
+// --from may name the blogs repository root or its content/ directory. Both are
+// accepted, as the help text says, so the directory that holds YYYY/MM/*.md is
+// worked out here. Without this the root's content/ subtree was copied whole and
+// the posts landed at content/content/, while the root's own README.md and
+// CONTRIBUTING.md were copied in beside them as posts and failed the build gate.
+function postsDirOf(from) {
+  return isDir(join(from, 'content')) ? join(from, 'content') : from;
+}
+
 function findSource() {
   const gh = arg('--from-github');
   if (gh) {
@@ -74,7 +83,7 @@ function findSource() {
     return join(tmp, 'content');
   }
   const from = arg('--from');
-  if (from) return resolve(from);
+  if (from) return postsDirOf(resolve(from));
   for (const cand of [
     join(SITE_ROOT, '..', 'belmont-news', 'blogs', 'content'),
     join(SITE_ROOT, '..', 'blogs', 'content'),
