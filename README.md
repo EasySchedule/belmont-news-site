@@ -373,10 +373,10 @@ Those two agree when the site is current.
 **How long that takes, measured, not declared.** Two triggers answer this
 question and they are not equally good.
 
-| Trigger | Fires | Measured latency |
+| Trigger | Fires | Latency |
 |---|---|---|
-| `repository_dispatch` | when the store moves | seconds, plus one build |
-| `schedule` (`*/15`) | on a timer | 1h to 7h, median 4h17m |
+| `repository_dispatch` | when the store moves | the event plus one build. GitHub publishes no maximum. |
+| `schedule` (`*/15`) | on a timer | measured 1h to 7h, median 4h17m |
 
 The `*/15` cron declares a fifteen-minute window and does not deliver it. Over
 54 hours it fired 13 times against 217 windows, a firing rate of 6%. The worst
@@ -390,12 +390,14 @@ stays because it is anonymous and needs no credential, and because it means an
 edition is never more than one missed window behind. It is not what makes a
 06:00 edition visible on time.
 
-So a blogs merge publishes in seconds once the durable trigger is live, and up
-to about seven hours while it is dormant.
+So the durable trigger removes the timer, and therefore removes the failure
+that is measured above. It does not have a documented latency, so nobody should
+quote one for it: record the real figure here once it is live and used.
 
 `repository_dispatch` is wired into the workflow and **dormant**. Nothing sends
 the event yet: the sender belongs in `belmont-news-blogs` and needs a credential
-there that can write to this repository, which is a credential decision for Taz
+there that can write to this repository, which was approved as a credential
+decision for Taz
 Loring rather than a build change. Until it exists, the workflow behaves exactly
 as it does today. The deploy order, which cannot be reordered, is in the header
 of `.github/workflows/publish-on-blogs-update.yml`.

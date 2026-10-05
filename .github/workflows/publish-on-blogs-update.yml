@@ -35,9 +35,10 @@
 # path, and there is still exactly one publish path.
 #
 #   repository_dispatch  the durable answer, and the one BEL-18 section 7.3
-#                        asks for. It fires when the store moves, not on a
-#                        timer, so the publish latency is the event plus one
-#                        build, measured in seconds rather than hours. It is
+#                        asks for. It fires when the store moves rather than on
+#                        a timer, so it cannot suffer the cron failure measured
+#                        above. GitHub publishes no maximum latency for it, so
+#                        this file claims no figure: measure it once live. It is
 #                        wired below but DORMANT: the sender lives in
 #                        belmont-news-blogs and needs a credential there that
 #                        can write to this repository, which is a credential
