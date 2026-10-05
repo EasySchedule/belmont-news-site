@@ -760,12 +760,43 @@ ${items}
 // If the desk later rules that expired pages are withdrawn rather than aged out,
 // that is a new issue and it needs a mechanism decided there: this host's
 // redirect story, and whether a withdrawn URL is served a 404 body or moved.
+// The latest date a corrections page actually prints, for `lastmod`.
+//
+// This was `log.entries[0]`, and the log is append-only, so entries[0] is the
+// OLDEST entry rather than the newest. On 2026-10-03 three corrections were
+// appended under the three that were already there and the value stayed pinned
+// to 2026-10-02, so a crawler reading the sitemap was told the corrections page
+// had not changed since the day before the two superseding corrections landed on
+// it. A corrections log a search engine cannot be told to re-read is not doing
+// its job, and the entries it was hiding are the ones explicitly marked
+// superseded. BEL-137.
+//
+// Both dates count because both are printed on the page: it changes when a
+// correction is appended, and when an entry names a later-dated post. ISO dates
+// compare correctly as strings, so the max is the max.
+//
+// '' means say nothing. `lastmod` is optional in the sitemap protocol, and an
+// invented date is worse than an absent one: the old fallback was the month,
+// `2026-10`, a partial date many parsers reject or coerce. A log with no
+// corrections has no modification date to report, so the element is omitted
+// rather than guessed at.
+function lastPrintedDate(dates) {
+  return dates.reduce((newest, d) => (d && d > newest ? d : newest), '');
+}
+
+function logLastmod(log) {
+  return lastPrintedDate(log.entries.flatMap((e) => [e.correctionDate, e.postDate]));
+}
+
 function sitemap() {
   const urls = [
     { loc: abs(''), lastmod: '' },
     ...posts.map((p) => ({ loc: abs(p.url), lastmod: p.fm.date })),
-    { loc: abs(correctionsIndexUrl), lastmod: corrections.logs[0]?.month || '' },
-    ...corrections.logs.map((log) => ({ loc: abs(correctionsMonthUrl(log.month)), lastmod: log.entries[0]?.correctionDate || log.month })),
+    // The index is as current as the newest entry on any month page beneath it,
+    // so it takes the newest date across every log rather than the newest log's
+    // month.
+    { loc: abs(correctionsIndexUrl), lastmod: lastPrintedDate(corrections.logs.map(logLastmod)) },
+    ...corrections.logs.map((log) => ({ loc: abs(correctionsMonthUrl(log.month)), lastmod: logLastmod(log) })),
   ].map((u) => `  <url>
     <loc>${esc(u.loc)}</loc>
     ${u.lastmod ? `<lastmod>${esc(u.lastmod)}</lastmod>` : ''}
