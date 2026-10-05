@@ -851,6 +851,33 @@ const FEED_TTL_MINUTES = 60;
 const newestItemAt = feedItems.reduce((newest, { publishedAt }) => Math.max(newest, publishedAt), 0);
 const lastBuildAt = Math.min(newestItemAt || SHIPPED_AT, SHIPPED_AT);
 
+// The channel's second Atom link, to the corrections log.
+//
+// RSS 2.0 has no channel element for "see also". It defines title, link,
+// description and a fixed list of optional elements, and none of them points at
+// another page on the site. The Atom extension is the one place a feed can carry
+// a second URL, so `atom:link rel="related"` is the only spec-legal way to say
+// this, and it is what the board chose on 2026-10-05 for BEL-138 over the two
+// alternatives: leaving the feed with no route to the log, and publishing every
+// correction as a feed item.
+//
+// Be clear about what this is worth, because the honest answer is "not much to a
+// reader's reader". Most readers render `rel="self"` and ignore everything else,
+// so a subscriber will not see the link in the app. What it does buy is that the
+// feed itself stops being a dead end for anything that reads the XML: a validator,
+// an archive tool, or a reader that does honour `related` now has the corrections
+// log in the same document as the stories, which is the promise the footer makes
+// in the words "corrections are published, never silently applied".
+//
+// It is a channel element, not an item, so it never enters a reader's story list
+// and never costs a subscriber an unread item. That is the deliberate difference
+// from the item option, and it is why this one is safe to ship without an
+// editorial review of new reader-visible copy: the only words here are the word
+// "Corrections", which is the masthead's own.
+//
+// The target always resolves. `/corrections/` is written on every build whether or
+// not a log exists, so this link can never point at a 404 the way a per-post
+// correction link deliberately can.
 function feed() {
   const items = feedItems.map(({ post: p, publishedAt }) => {
     // The address goes in <author> only when the post supplies one, and the name
@@ -882,6 +909,7 @@ function feed() {
   <title>Belmont News</title>
   <link>${esc(opts.siteUrl)}/</link>
   <atom:link href="${esc(abs('feed.xml'))}" rel="self" type="application/rss+xml" />
+  <atom:link href="${esc(abs(correctionsIndexUrl))}" rel="related" type="text/html" title="Corrections" />
   <description>Independent local news for Belmont County, Ohio.</description>
   <language>en-us</language>
   <lastBuildDate>${new Date(lastBuildAt).toUTCString()}</lastBuildDate>

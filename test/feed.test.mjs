@@ -307,3 +307,52 @@ test('a newsroom with no corrections log omits lastmod rather than guessing a pa
   assert.ok(index);
   assert.doesNotMatch(index[1], /<lastmod>/, 'no corrections means no modification date to report');
 });
+// ------------------------------------------------ the corrections log, linked
+//
+// RSS 2.0 has no channel element for "see also", so the Atom extension is the only
+// spec-legal place a feed can carry a second URL. The board chose this on
+// 2026-10-05 for BEL-138 over leaving the feed with no route to the log and over
+// publishing every correction as a feed item.
+
+test('the channel carries an Atom link to the corrections log', () => {
+  const r = buildFixture(AUDIT_DAY_POSTS, { today: '2026-10-05' });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(
+    r.feed,
+    /<atom:link href="https:\/\/example\.test\/corrections\/" rel="related" type="text\/html" title="Corrections" \/>/,
+    'the corrections log must be reachable from the feed document itself',
+  );
+});
+
+test('the corrections link sits beside the self link and does not replace it', () => {
+  const r = buildFixture(AUDIT_DAY_POSTS, { today: '2026-10-05' });
+  const channel = /<channel>[\s\S]*?<\/channel>/.exec(r.feed)[0];
+  const links = [...channel.matchAll(/<atom:link [^>]*rel="(\w+)"[^>]*\/>/g)].map((m) => m[1]);
+  // Both, and both inside <channel>. A self link that got clobbered by a related
+  // one breaks the feed in the aggregators that use it to dedupe entries.
+  assert.deepEqual(links.sort(), ['related', 'self']);
+  assert.match(channel, /rel="self"/);
+  // Two atom:link elements and no more: this is one link, not a menu.
+  assert.equal((channel.match(/<atom:link /g) || []).length, 2);
+});
+
+test('the corrections link is a channel element and never enters a reader story list', () => {
+  const r = buildFixture(AUDIT_DAY_POSTS, { today: '2026-10-05' });
+  // The reason this option was chosen over corrections-as-items: a subscriber
+  // must not get an unread correction in their story stream.
+  for (const item of r.feed.match(/<item>[\s\S]*?<\/item>/g) || []) {
+    assert.doesNotMatch(item, /corrections\//, 'a corrections URL inside an <item> would be a correction item');
+  }
+  assert.equal((r.feed.match(/corrections\//g) || []).length, 1);
+});
+
+test('the corrections link resolves even with no corrections log at all', () => {
+  // The link must never be a 404. This fixture builds no corrections directory,
+  // and /corrections/ is still written on every build.
+  const r = buildFixture(AUDIT_DAY_POSTS, { today: '2026-10-05' });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.feed, /href="https:\/\/example\.test\/corrections\/" rel="related"/);
+  const page = readFileSync(join(r.root, 'dist', 'corrections', 'index.html'), 'utf8');
+  assert.match(page, /<h1 class="page-title">Corrections<\/h1>/,
+    'the link target must exist on a build that has logged no correction');
+});

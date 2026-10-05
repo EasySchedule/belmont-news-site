@@ -175,6 +175,31 @@ newsroom feed is a contact point that bounces, and a bounced contact point is
 worse than no contact point. `build-info.json` reports `feed.authorsWithAddress`
 so the gap is visible rather than assumed.
 
+## The corrections log in the feed
+
+The channel carries a second Atom link:
+
+```xml
+<atom:link href="https://…/corrections/" rel="related" type="text/html" title="Corrections" />
+```
+
+RSS 2.0 has no channel element for "see also" — it defines a fixed set and none
+of them points at another page on the site. The Atom extension is the one place a
+feed can carry a second URL, so this is the only spec-legal way to put the log in
+the same document as the stories.
+
+**Expect this to be invisible in most readers.** They render `rel="self"` and
+ignore everything else. What it buys is that the feed stops being a dead end for
+anything that reads the XML — a validator, an archive tool, or a reader that does
+honour `related` — which is the promise the footer makes in the words
+"corrections are published, never silently applied".
+
+It is a channel element, so it never enters a reader's story list and never costs
+a subscriber an unread item. That was the deciding difference against publishing
+each correction as a feed item, which the board declined on 2026-10-05 for
+exactly that reason. The target always resolves: `/corrections/` is written on
+every build whether or not a log exists.
+
 ## The rolling listing
 
 The front page is a rolling listing. A post stops being "Latest" when the newsroom
