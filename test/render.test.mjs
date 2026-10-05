@@ -363,3 +363,56 @@ ${entry('2026-10-02', 'first, printed \`NONE\`')}${entry('2026-10-02', 'second, 
   assert.match(texts[1], /second, printed 33 percent/);
   assert.match(texts[2], /third, printed <code>in_progress<\/code>/);
 });
+
+// ------------------------------------ BEL-132: a JSON body is not a story
+//
+// One published post's body was a whole document API response object instead of
+// the response's `body` field. The reader got a page whose body was a single
+// escaped JSON object: no headings, the article visible only as a JSON string,
+// and the store's internal ids printed in reader-facing HTML.
+//
+// The front matter was correct, so the sources gate passed, the build succeeded
+// and the deploy went out. It survived because the post had expired, dropping
+// out of the front page and feed.xml, while sitemap.xml still pointed at it.
+
+const ENVELOPE = `${JSON.stringify({
+  id: '022ea0dc-0996-4b21-8b25-21c2fe34e21f',
+  companyId: 'e932f2d1-8b59-4754-a733-7e1f5428778c',
+  issueId: '1e4c01a0-61c5-40eb-b1ad-bd8cdad57b49',
+  key: 'morning-briefing-2026-10-02-evening',
+  title: 'Morning Briefing - Evening Edition 2026-10-02 20:00 EDT',
+  format: 'markdown',
+  body: '## The lead call\n\n**NONE.** The morning edition has not run.\n',
+  latestRevisionId: '83ef1278-af12-4287-895d-637f1561d818',
+  createdByAgentId: '367c5a4f-a12f-41f8-9028-facc3b20e105',
+  annotations: [],
+})}\n`;
+
+test('the build refuses a post whose body is a serialised API response', () => {
+  const r = render(`${FRONT}\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', ENVELOPE);
+  assert.equal(r.code, 1, 'an API envelope as a post body must fail the build');
+  assert.match(r.stderr, /serialised API response/);
+  assert.match(r.stderr, /fenced code block/, 'the message must say what to write instead');
+});
+
+test('no rendered page leaks an internal store id', () => {
+  // The reader-facing half of the defect. A gate that refuses the envelope
+  // stops it, and this asserts the property directly against the built HTML.
+  const r = render(`${FRONT}\n${SOURCES}`, 'belmont-county-three-day-weather-roundup',
+    '## The roundup\n\nRain tonight, then a dry weekend.\n');
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.html, /companyId|createdByAgentId|latestRevisionId|issueId/);
+  assert.doesNotMatch(r.html, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+});
+
+test('ordinary prose still builds, including prose holding braces or JSON', () => {
+  for (const body of [
+    '## The roundup\n\nRain tonight, then a dry weekend.\n',
+    'The desk logged the reading {high 73} and moved on.\n',
+    'The response was {"ok":true} and nothing else came back.\n',
+    'A reader sent this:\n\n```json\n{"id":"abc","body":"hi"}\n```\n\nIt parsed clean.\n',
+  ]) {
+    const r = render(`${FRONT}\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', body);
+    assert.equal(r.code, 0, `this body must build: ${JSON.stringify(body.slice(0, 60))} -> ${r.stderr}`);
+  }
+});

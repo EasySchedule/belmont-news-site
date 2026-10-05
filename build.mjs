@@ -313,6 +313,46 @@ function fail(msg) {
   process.exit(1);
 }
 
+// ------------------------------------- serialised API response in a post body
+//
+// BEL-132. One published post's body was a whole document API response object
+// rather than the response's `body` field, so the reader received the article
+// trapped inside an escaped JSON string, with the store's internal companyId,
+// issueId, id, createdByAgentId and latestRevisionId printed in reader-facing
+// HTML.
+//
+// This check lives here as well as in the markdown store's own gate, and that
+// duplication is the point. The store's gate catches it on the pull request
+// that files the post. This one catches it if a post reaches the build any
+// other way, including a hand-edited content snapshot committed here directly:
+// the site publishes whatever it renders, so the publish path refuses it rather
+// than relying on a check in another repository having run first.
+//
+// It is a shape test rather than a key-name test on purpose. Naming this one
+// store's fields would only catch this store; what does not vary is that the
+// body parses as a JSON object carrying the article in a nested string.
+function envelopeError(body, rel) {
+  const prose = String(body).replace(/^```[\s\S]*?^```/gm, '').trim();
+  if (!prose.startsWith('{') || !prose.endsWith('}')) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(prose);
+  } catch {
+    // Not valid JSON, so not an envelope. Prose that opens with a brace is
+    // ordinary copy and must not be refused for it.
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (typeof parsed.body !== 'string' || !parsed.body.trim()) return null;
+
+  return `${rel}: the post body is a serialised API response object, not prose. `
+    + `The whole response was written here instead of its "body" field, so the `
+    + `article is trapped inside a JSON string and internal ids are published in `
+    + `reader-facing HTML. Write the body's own text as the post body. If this `
+    + `post genuinely has to show a JSON sample, put it in a fenced code block.`;
+}
+
 // ------------------------------------------------------------ discovery
 
 function walk(dir, out = []) {
@@ -354,6 +394,8 @@ const posts = files.map((f) => {
   // which is the exact defect this rule was added to remove.
   const badExpiry = expiryError(data, rel);
   if (badExpiry) fail(badExpiry);
+  const badBody = envelopeError(body, rel);
+  if (badBody) fail(badBody);
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 
