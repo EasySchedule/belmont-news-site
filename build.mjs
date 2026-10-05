@@ -1161,8 +1161,9 @@ ${markdown(p.body)}
 //
 // The heading says "Latest" either way. When the window came up empty and the
 // fallback filled the page, the build warns on stderr and records
-// `listing.fallback` in build-info.json rather than putting a caveat on the front
-// page of a newspaper.
+// `listing.fallback` in build-info.json, and the notice above the cards comes
+// from listingNotice(). The warning and the record are how the build says so out
+// loud; they are in addition to the notice, not instead of it.
 function homePage() {
   const cards = listing.map((p) => `
   <article class="card">
