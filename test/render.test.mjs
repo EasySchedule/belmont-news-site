@@ -293,11 +293,14 @@ test('an ordered list that starts above 1 still opens a list', () => {
   assert.match(r.html, /<ol><li>Third place\.<\/li><li>Fourth place\.<\/li><\/ol>/);
 });
 
+// The blank line matters here. With one, the paragraph is already flushed by the
+// time "1." arrives and the assertion is satisfied by the para.length === 0
+// branch, so the case proves nothing about interrupting. Without one, the only
+// thing that can make this an <ol> is the start-at-1 rule itself.
 test('an ordered list starting at 1 still interrupts a paragraph', () => {
   const body = [
     'A lead paragraph that runs on',
     'across two lines.',
-    '',
     '1. First item.',
     '2. Second item.',
     '',
@@ -306,6 +309,45 @@ test('an ordered list starting at 1 still interrupts a paragraph', () => {
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.html, /<ol><li>First item\.<\/li><li>Second item\.<\/li><\/ol>/);
   assert.match(r.html, /<p>A lead paragraph that runs on across two lines\.<\/p>/);
+});
+
+// CommonMark lets an unordered list interrupt a paragraph as long as its first
+// item is not empty. The start-at-1 rule above belongs to ordered lists only.
+// When the two were conflated, this body rendered as one paragraph with the
+// bullets typed inline, and nothing in the store did it yet to catch it.
+test('an unordered list interrupts a paragraph with no blank line before it', () => {
+  const body = [
+    'The tier list reads as follows, and the tiers are',
+    '- Freedom Sponsors, which include Belmont County',
+    '- Tribute Sponsors, which include UPMC',
+    '',
+  ].join('\n');
+  const r = bodyAt('tier-list', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(
+    r.html,
+    /<ul><li>Freedom Sponsors, which include Belmont County<\/li><li>Tribute Sponsors, which include UPMC<\/li><\/ul>/,
+    'the bullets stopped being bullets',
+  );
+  assert.match(r.html, /<p>The tier list reads as follows, and the tiers are<\/p>/);
+  assert.doesNotMatch(r.html, /tiers are - /, 'a bullet was typed inline into the paragraph');
+});
+
+// An ordered marker indented under an open paragraph is the same rule with
+// leading whitespace. The marker pattern accepts ^\s*, so the interrupt test has
+// to as well, or an indented "1." becomes paragraph text while a flush one does
+// not.
+test('an indented 1. still interrupts a paragraph', () => {
+  const body = [
+    'The host committee lists its sponsors in tiers',
+    '  1. Freedom Sponsors',
+    '  2. Tribute Sponsors',
+    '',
+  ].join('\n');
+  const r = bodyAt('indented-interrupting-list', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<ol><li>Freedom Sponsors<\/li><li>Tribute Sponsors<\/li><\/ol>/);
+  assert.match(r.html, /<p>The host committee lists its sponsors in tiers<\/p>/);
 });
 
 // ------------------------------------------------------- the reader sees a correction
