@@ -840,6 +840,7 @@ function feed() {
   <title>Belmont News</title>
   <link>${esc(opts.siteUrl)}/</link>
   <atom:link href="${esc(abs('feed.xml'))}" rel="self" type="application/rss+xml" />
+  <atom:link href="${esc(abs(correctionsIndexUrl))}" rel="related" type="text/html" title="Corrections" />
   <description>Independent local news for Belmont County, Ohio.</description>
   <language>en-us</language>
   <lastBuildDate>${new Date(lastBuildAt).toUTCString()}</lastBuildDate>
