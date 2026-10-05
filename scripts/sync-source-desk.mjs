@@ -20,9 +20,30 @@ const TARGET = process.env.SOURCE_DESK_TARGET ?? 'research/source-desk.md';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+// The key leaves this process in an Authorization header on this URL. Plain HTTP
+// to anything but loopback would put it on the wire in cleartext, so refuse the
+// URL rather than send it.
+function assertTransportIsSafe(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('PAPERCLIP_API_URL is not a URL.');
+  }
+  if (url.protocol === 'https:') return;
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (url.protocol === 'http:' && LOOPBACK_HOSTS.has(host)) return;
+  throw new Error(
+    `PAPERCLIP_API_URL must be https, or http on a loopback host. Refusing to send the API key over ${url.protocol}//${url.host}.`,
+  );
+}
+
 function apiBase() {
   const raw = process.env.PAPERCLIP_API_URL;
   if (!raw) throw new Error('PAPERCLIP_API_URL is not set.');
+  assertTransportIsSafe(raw);
   return raw.replace(/\/+$/, '').replace(/\/api$/, '');
 }
 
