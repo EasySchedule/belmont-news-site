@@ -172,10 +172,55 @@ function splitRow(line) {
   return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
 }
 
+// Whether a pipe table starts at `at`: a header row, then a separator row of
+// dashes, colons and pipes. One predicate, so the caption line above a table and
+// the table itself cannot disagree about what a table is.
+function tableStartsAt(lines, at) {
+  if (at < 0 || at + 1 >= lines.length) return false;
+  return /\|/.test(lines[at]) && /^\s*\|?[\s:-]*-[\s:|-]*$/.test(lines[at + 1]);
+}
+
+// Text of a heading or caption with its Markdown link markup removed, leaving the
+// words a reader reads.
+//
+// Only for the caption the renderer writes itself, and only because that caption
+// is off-screen. `inline()` turns `[x](/y)` into a real link, and a focusable
+// link inside a `visually-hidden` caption is a keyboard user tabbing to something
+// with no visible focus target and no way to know where they are. The heading it
+// borrows the words from is already printed on the page, so keeping its links buys
+// nothing and costs that.
+function plainText(src) {
+  return String(src || '').replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1').trim();
+}
+
+// ------------------------------------------------- the caption for a table
+//
+// A caption the author wrote, on the line above the table, is the caption a reader
+// sees. A table whose author wrote none still gets one, taken from the nearest
+// heading above it and kept out of the visual layout: that heading is already on
+// the page, so printing it twice in a row is noise. Hidden is not absent — the
+// caption stays in the accessibility tree, which is the part that was missing.
+//
+// The fallback is what makes this hold for the next story. Nothing in a post has
+// to opt in for its table to be navigable, so a queued story carrying a table
+// cannot reintroduce the defect this fixes.
+const TABLE_CAPTION_FALLBACK = 'Data table';
+
+function captionTag(written, nearestHeading) {
+  if (written) return `<caption>${inline(written)}</caption>`;
+  const text = plainText(nearestHeading) || TABLE_CAPTION_FALLBACK;
+  return `<caption class="visually-hidden">${esc(text)}</caption>`;
+}
+
 function markdown(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
+  // The nearest heading above the table that still needs a caption. Reset per
+  // call, so a blockquote's own headings are the ones its own tables fall back to.
+  let lastHeading = '';
+  // Set by a `Table:` line, spent by the table it is written above.
+  let pendingCaption = null;
 
   const flushParagraph = (buf) => {
     if (buf.length) out.push(`<p>${inline(buf.join(' '))}</p>`);
@@ -204,6 +249,7 @@ function markdown(src) {
       flushParagraph(para);
       const lvl = h[1].length;
       out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`);
+      lastHeading = h[2].trim();
       i++;
       continue;
     }
@@ -225,19 +271,45 @@ function markdown(src) {
       continue;
     }
 
+    // A caption written above a table: `Table: <text>` on a line of its own.
+    //
+    // It is consumed here rather than in the table branch so a blank line may sit
+    // between the caption and the table, which is how the rest of this subset
+    // separates blocks and how anyone writes a caption in an editor. It is only
+    // consumed when a table really is the next block, so a `Table:` line that is
+    // not above a table stays ordinary prose.
+    const captionLine = /^Table:\s+(\S.*)$/.exec(line);
+    if (captionLine) {
+      let next = i + 1;
+      while (next < lines.length && !lines[next].trim()) next++;
+      if (tableStartsAt(lines, next)) {
+        flushParagraph(para);
+        pendingCaption = captionLine[1].trim();
+        i++;
+        continue;
+      }
+    }
+
     // table
-    if (/\|/.test(line) && i + 1 < lines.length && /^\s*\|?[\s:-]*-[\s:|-]*$/.test(lines[i + 1])) {
+    if (tableStartsAt(lines, i)) {
       flushParagraph(para);
+      const caption = pendingCaption;
+      pendingCaption = null;
       const head = splitRow(line);
       const align = splitRow(lines[i + 1]).map((c) => (/:-$/.test(c) ? 'right' : /^:-$|^:-/.test(c) ? 'center' : ''));
       i += 2;
       const rows = [];
       while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) rows.push(splitRow(lines[i++]));
-      const th = head.map((c, k) => `<th${align[k] ? ` style="text-align:${align[k]}"` : ''}>${inline(c)}</th>`).join('');
+      // Every header cell names its column. `scope="col"` on the one header row
+      // is what lets a screen reader say "69 °F, High" instead of "69 °F", and on
+      // a table with a single header row it is the whole association: an
+      // id/headers pair per cell would be the same information spelled out once
+      // per column, and this renderer has exactly one table shape.
+      const th = head.map((c, k) => `<th scope="col"${align[k] ? ` style="text-align:${align[k]}"` : ''}>${inline(c)}</th>`).join('');
       const body = rows
         .map((r) => `<tr>${r.map((c, k) => `<td${align[k] ? ` style="text-align:${align[k]}"` : ''}>${inline(c)}</td>`).join('')}</tr>`)
         .join('');
-      out.push(`<div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table></div>`);
+      out.push(`<div class="table-wrap"><table>${captionTag(caption, lastHeading)}<thead><tr>${th}</tr></thead><tbody>${body}</tbody></table></div>`);
       continue;
     }
 
@@ -621,10 +693,90 @@ function correctionPostRef(e) {
 // markup. The log stays append-only either way: nothing here edits a published
 // entry, it renders the bytes the desk already wrote.
 
-function correctionEntry(e) {
-  return `  <article class="correction">
+// --- one correction, three ways of naming it ------------------------------
+//
+// The heading a reader navigates by, the id they can link to, and the ordinal
+// that keeps two corrections on one post apart are all the same problem: on
+// 2026-10-05 the month page rendered six <article class="correction"> whose h2s
+// were 3x "Correction (2026-10-02)" and 3x "Correction (2026-10-03)", with no id
+// on any of them. A heading list of six identical entries tells a screen-reader
+// user nothing, and with no id there was no way to send anyone to one correction
+// instead of to the month.
+//
+// The id is derived from the entry, not from its position, so appending a
+// correction never renumbers the ones above it: the ordinal is only added after
+// the first entry for a given post on a given correction date. A reader who
+// bookmarked the first correction to a post keeps that bookmark when the second
+// lands three days later.
+//
+// All three fields are in the id, not two. A post corrected twice in one month on
+// two different dates would otherwise give both entries the same base id, and the
+// second link in that post's own Corrections block would open the first entry —
+// the exact "reader follows the link and lands on the wrong correction" failure
+// the anchor exists to remove.
+const correctionSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+function correctionId(e) {
+  return `correction-${e.postDate}-${e.correctionDate}-${correctionSlug(e.slug)}`;
+}
+
+// Pair every entry of a log with the id it publishes under, and with a heading
+// that names the claim it corrects.
+//
+// Two guards, because the month page is the one surface where two entries
+// collide in the reader's eye. `used` is belt and braces: two different slugs can
+// slugify to the same string (`a_b` and `a-b` both become `a-b`), and a duplicate
+// id on one page points two anchors at the first match. `seenLeads` is the one
+// that matters for the audit: two corrections on the same post, same date, whose
+// claims start with the same words would otherwise render the same heading again,
+// which is the defect in its original form. The second one is numbered rather
+// than left to look identical.
+const CORRECTION_LEAD_MAX = 140;
+
+// What a reader needs to tell two corrections apart, taken from the entry itself:
+// the desk's own "what was wrong / what is right" separator means the text before
+// the first ` / ` is the claim being corrected, which is the half that identifies
+// it. Long claims are cut at a word boundary. Nothing here restates the
+// correction: the full text is still printed in full directly below the heading.
+function correctionLead(text) {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  const claim = flat.split(' / ')[0].trim() || flat;
+  if (claim.length <= CORRECTION_LEAD_MAX) return claim;
+  const cut = claim.slice(0, CORRECTION_LEAD_MAX);
+  const at = cut.lastIndexOf(' ');
+  return `${(at > 40 ? cut.slice(0, at) : cut).replace(/[\s,;:—-]+$/, '')}…`;
+}
+
+function correctionsWithIds(log) {
+  const used = new Set();
+  const seenLeads = new Set();
+  return log.entries.map((e) => {
+    let id = correctionId(e);
+    for (let n = 2; used.has(id); n += 1) id = `${correctionId(e)}-${n}`;
+    used.add(id);
+    let lead = correctionLead(e.correction);
+    if (seenLeads.has(lead)) {
+      let n = 2;
+      while (seenLeads.has(`${lead} (${n})`)) n += 1;
+      lead = `${lead} (${n})`;
+    }
+    seenLeads.add(lead);
+    return { entry: e, id, lead };
+  });
+}
+
+function correctionEntry(e, id, lead) {
+  const when = `<span class="correction-when">Correction (<time datetime="${esc(e.correctionDate)}">${esc(e.correctionDate)}</time>)</span>`;
+  // The permalink's accessible name carries the date and the claim. Every entry
+  // on the month page used to be announced as "Permalink to this correction", so
+  // the link list a screen reader can pull up was six rows of the same words.
+  const name = `Permalink to the ${esc(e.correctionDate)} correction: ${esc(lead)}`;
+  return `  <article class="correction" id="${esc(id)}">
     <p class="kicker">${correctionPostRef(e)}</p>
-    <h2>Correction (<time datetime="${esc(e.correctionDate)}">${esc(e.correctionDate)}</time>)</h2>
+    <h2>
+      ${when}
+      <span class="correction-lead">${inline(lead)}</span><a class="permalink" href="#${esc(id)}" aria-label="${name}">#</a>
+    </h2>
     <p class="correction-text">${inline(e.correction)}</p>
     ${e.publishedIn ? `<p class="correction-meta">Published in: ${esc(e.publishedIn)}</p>` : ''}
     ${e.correctedBy ? `<p class="correction-meta">Corrected by: ${esc(e.correctedBy)}</p>` : ''}
@@ -635,7 +787,7 @@ function correctionsIndexPage() {
   const listing = corrections.logs.map((log) => `
   <article class="card corrections-card">
     <h2><a href="${esc(key(correctionsMonthUrl(log.month)))}">${esc(log.title || `Corrections, ${log.month}`)}</a></h2>
-    <p class="byline">${log.entries.length} correction${log.entries.length === 1 ? '' : 's'} on record</p>
+    <p class="card-note">${log.entries.length} correction${log.entries.length === 1 ? '' : 's'} on record</p>
   </article>`).join('\n');
 
   const body = `
@@ -659,7 +811,7 @@ function correctionsMonthPage(log) {
 <h1 class="page-title">${esc(log.title || `Corrections, ${log.month}`)}</h1>
 ${log.standingRule ? `<p class="lede">${esc(log.standingRule)}</p>` : ''}
 <section class="corrections-log">
-${log.entries.map(correctionEntry).join('\n')}
+${correctionsWithIds(log).map(({ entry, id, lead }) => correctionEntry(entry, id, lead)).join('\n')}
 </section>
 <p class="back"><a href="${esc(key(correctionsIndexUrl))}">← All corrections</a></p>`;
   return shell({
@@ -756,9 +908,54 @@ ${rows}
 </section>`;
 }
 
-function correctionsBlock(corrections) {
-  if (!Array.isArray(corrections) || !corrections.length) return '';
-  const items = corrections.map((c) => `    <li><strong>Correction (${esc(c.date)}):</strong> ${esc(c.correction)}</li>`).join('\n');
+// Each correction in a post's own Corrections block links to its entry in the
+// log, not only to the month index. The entry carries an id and a heading, so the
+// reader lands on the one correction instead of hunting for it among every other
+// entry in the month.
+//
+// The id is not recomputed here. It is read out of the log this build actually
+// rendered, keyed on the post, the correction date and the claim, and the first
+// unused match is taken. Recomputing it was the earlier attempt and it had two
+// ways to be wrong: it trusted the month page existing rather than the entry
+// existing, and it counted ordinals from the post's own list rather than from the
+// log's. Either way a reader who followed the link landed on a correction that
+// was not theirs — on a page built for the opposite purpose.
+//
+// No matching entry, no link. The month index stays below either way.
+const correctionEntryIndex = (() => {
+  const index = new Map();
+  for (const log of corrections.logs) {
+    for (const { entry, id, lead } of correctionsWithIds(log)) {
+      const k = `${entry.postDate}|${entry.slug}|${entry.correctionDate}`;
+      if (!index.has(k)) index.set(k, []);
+      index.get(k).push({ id, lead, used: false });
+    }
+  }
+  return index;
+})();
+
+function correctionLogHref(post, c, usedEntries) {
+  const bucket = correctionEntryIndex.get(`${post.fm.date}|${post.fm.slug}|${c.date}`);
+  if (!bucket) return null;
+  const lead = correctionLead(c.correction);
+  const hit = bucket.find((b) => !b.used && b.lead === lead) || bucket.find((b) => !b.used);
+  if (!hit) return null;
+  hit.used = true;
+  usedEntries.push(hit);
+  const month = String(c.date || '').slice(0, 7);
+  return `${key(correctionsMonthUrl(month))}#${hit.id}`;
+}
+
+function correctionsBlock(post, list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  const usedEntries = [];
+  const items = list.map((c) => {
+    const href = correctionLogHref(post, c, usedEntries);
+    const link = href
+      ? ` <a class="correction-log-link" href="${esc(href)}">Open this entry in the corrections log</a>`
+      : '';
+    return `    <li><strong>Correction (${esc(c.date)}):</strong> ${esc(c.correction)}${link}</li>`;
+  }).join('\n');
   return `<section class="corrections">
   <h2>Corrections</h2>
   <ul>
@@ -938,7 +1135,7 @@ function postPage(p) {
   <div class="post-body">
 ${markdown(p.body)}
   </div>
-  ${correctionsBlock(fm.corrections)}
+  ${correctionsBlock(p, fm.corrections)}
   ${sourcesBlock(fm.sources)}
 </article>
 <p class="back"><a href="${esc(key(''))}">← All posts</a></p>`;

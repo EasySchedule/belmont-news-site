@@ -251,6 +251,22 @@ table {
   font-size: 0.88rem;
 }
 
+/* A table caption. Author-written, it sits above the table the way a printed table
+   is captioned; one the renderer derived from the heading above the table is
+   carried for a screen reader and not printed, because that heading is already on
+   the page. The hidden half uses the sheet's existing `.visually-hidden`, which is
+   already off-screen without being out of the accessibility tree. */
+caption {
+  caption-side: top;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  padding: 0 0 0.45rem;
+}
+
 th, td {
   border-bottom: 1px solid var(--rule);
   padding: 0.55rem 0.7rem;
@@ -381,12 +397,49 @@ tbody tr:hover { background: var(--accent-soft); }
 
 .correction h2 {
   margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+  line-height: 1.42;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The date keeps the small uppercase accent label it always was, as the first
+   line of the heading. The claim it corrects is what a reader scans for when
+   they navigate by heading, so it is set as ordinary heading text under it. */
+.correction-when {
+  display: block;
+  margin: 0 0 0.25rem;
   font-family: var(--font-sans);
   font-size: 0.75rem;
+  font-weight: 400;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--accent);
 }
+
+.correction-lead { color: var(--ink); }
+
+.permalink {
+  margin-left: 0.35rem;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.permalink:hover, .permalink:focus-visible { color: var(--accent); text-decoration: underline; }
+
+.correction-log-link {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.correction-log-link:hover, .correction-log-link:focus-visible { text-decoration: underline; }
 
 .correction-text { margin: 0 0 0.6rem; }
 
@@ -397,7 +450,17 @@ tbody tr:hover { background: var(--accent-soft); }
   color: var(--ink-soft);
 }
 
-.corrections-card .byline { margin: 0.2rem 0 0; }
+/* A count is not an attribution. `.byline` is the only class in this sheet that
+   means who wrote it, and the corrections index is the one page whose subject is
+   attribution, so the count of corrections on record never renders in it. */
+.corrections-card .card-note {
+  margin: 0.2rem 0 0;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
 
 .empty {
   margin: 1.5rem 0 0;
