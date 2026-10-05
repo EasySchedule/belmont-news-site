@@ -204,7 +204,27 @@ function markdown(src) {
     }
 
     // lists
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+    //
+    // A line inside an open paragraph does not get to open a list just because
+    // it begins with a digit and a period. That is how a wrapped paragraph
+    // lost its tail: the body of the Wall That Heals story wraps
+    //
+    //   The presenting sponsor is American Legion St. Clairsville Post
+    //   159. The host committee lists its sponsors in tiers. ...
+    //
+    // and "159." matched this regex. The renderer then treated the rest of the
+    // paragraph as a one-item ordered list, cut the marker out of the sentence
+    // so the sponsor read "Post" with no number, and left the remaining tiers
+    // in an orphan paragraph. One wrapped line, three visible defects, and the
+    // sentence silently disagreed with the Sources block on the same page.
+    //
+    // CommonMark already draws this line, and the rule is the whole fix: a list
+    // may interrupt a paragraph only if it is unordered, or if it is ordered
+    // and starts at 1. So while a paragraph is open, an ordered marker is only
+    // honoured when it reads "1.". Outside a paragraph, at the top of a block,
+    // nothing changes: "3." still opens a list there.
+    const interruptible = para.length === 0 || /^1\.\s+/.test(line);
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line) && interruptible) {
       flushParagraph(para);
       const ordered = /^\s*\d+\./.test(line);
       const items = [];
