@@ -99,6 +99,31 @@ const esc = (s) => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+// A link that opens a new tab has to say so. A screen-reader user cannot see
+// that the context is about to change, and on the Wall That Heals story the
+// Sources block is seven of these in a row.
+//
+// Two marks, doing two different jobs.
+//
+// The sentence goes in a visually hidden span, because that is text in the
+// document and it reaches assistive technology reliably. It is appended, never
+// prepended, so the visible text still leads the accessible name and voice
+// control on "click source" keeps working (WCAG 2.5.3).
+//
+// The arrow goes in an `aria-hidden` span rather than a CSS `content` value.
+// It looked equivalent and is not: Chrome with NVDA reads CSS generated
+// content aloud, so an arrow drawn by `content` joins the link's accessible
+// name and the screen-reader user is told "north east arrow" once per source.
+// `aria-hidden` on a real element is the one form that is excluded from the
+// accessibility tree in every combination. The visible text is not the arrow,
+// so hiding the arrow hides nothing a reader needs.
+//
+// Declared here rather than beside the Sources block that uses it most:
+// correction prose renders through inline() above, at module top level, and a
+// const declared further down would be in its temporal dead zone there.
+const NEW_TAB_HINT = '<span class="visually-hidden"> (opens in a new tab)</span>';
+const NEW_TAB_MARK = '<span class="ext-mark" aria-hidden="true">\u2197</span>';
+
 // ------------------------------------------------------------- markdown
 
 // A small, predictable subset: headings, paragraphs, blockquotes, fenced code,
@@ -122,8 +147,12 @@ function inline(src) {
   });
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) => {
     const safe = /^(https?:\/\/|\/|#|mailto:)/.test(href) ? href : '#';
-    const ext = /^https?:\/\//.test(safe) ? ' rel="noopener noreferrer" target="_blank"' : '';
-    return `<a href="${safe}"${ext}>${text}</a>`;
+    // An external link is the one case here that opens a new tab, so it is the
+    // one case that has to announce it. Same marker as the Sources block.
+    if (/^https?:\/\//.test(safe)) {
+      return `<a class="ext" href="${safe}" rel="noopener noreferrer" target="_blank">${text}${NEW_TAB_HINT}${NEW_TAB_MARK}</a>`;
+    }
+    return `<a href="${safe}">${text}</a>`;
   });
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
@@ -522,6 +551,16 @@ function analytics() {
 </script>`;
 }
 
+// The one template every page goes through: the front page, each post, the
+// corrections index, each monthly corrections log, and the 404.
+//
+// The skip link and the target it points at are added here together, on
+// purpose. A skip link with no `id` to land on is inert: it looks like the
+// defect is fixed, the browser jumps nowhere, and the keyboard user is still
+// five tab stops from the article. `<main id="main" tabindex="-1">` is the
+// other half. The `tabindex="-1"` is what makes it a real focus move rather
+// than a scroll, which is the difference between the link working and doing
+// nothing in WebKit. It is not in the tab order, so it adds no sixth stop.
 function shell({ title, description, body, canonical, self }) {
   return `<!doctype html>
 <html lang="en-US">
@@ -536,6 +575,7 @@ function shell({ title, description, body, canonical, self }) {
 ${analytics()}
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to main content</a>
 <header class="masthead">
   <a class="brand" href="${esc(key(''))}">Belmont News</a>
   <p class="tagline">Independent local news for Belmont County, Ohio</p>
@@ -546,7 +586,7 @@ ${analytics()}
     <a href="https://api.weather.gov/zones/forecast/OHZ059">NWS OHZ059</a>
   </nav>
 </header>
-<main>
+<main id="main" tabindex="-1">
 ${body}
 </main>
 <footer class="site-footer">
@@ -567,7 +607,7 @@ function sourcesBlock(sources) {
     const label = s.type === 'human' ? 'On the record' : 'Document';
     const org = s.organization ? ` — ${s.organization}` : '';
     const date = s.retrieved ? `, retrieved ${s.retrieved}` : '';
-    const link = s.url ? ` <a href="${esc(s.url)}" rel="noopener noreferrer" target="_blank">source</a>` : '';
+    const link = s.url ? ` <a class="ext" href="${esc(s.url)}" rel="noopener noreferrer" target="_blank">source${NEW_TAB_HINT}${NEW_TAB_MARK}</a>` : '';
     return `    <li><span class="src-type">${label}</span> ${esc(s.title || '')}${esc(org)}${esc(date)}.${link}</li>`;
   }).join('\n');
   return `<section class="sources">
