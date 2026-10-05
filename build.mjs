@@ -13,7 +13,7 @@ import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NEWSROOM_TZ, publicationInstant, buildEpochMs, calendarDay } from './scripts/dates.mjs';
 import { readCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
-import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, partition } from './scripts/expiry.mjs';
+import { DEFAULT_LISTING_DAYS, publicationDay, expiryError, expiredError, partition } from './scripts/expiry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -39,6 +39,15 @@ Usage: node build.mjs [options]
                       feed.xml, counting its own day (default ${DEFAULT_LISTING_DAYS}).
   --check           validate only, write nothing
   --help            this text
+
+Front matter the build reads beyond the required keys:
+
+  expires: 2026-10-30   replaces the listing window for this post alone.
+  expired: 2026-10-04   the story stopped being TRUE on this day, independently of
+  expired: true         the window. Before the day it is not in force, so a post can
+                        be marked on the morning it publishes. Either form removes
+                        the post from the listing and the feed, and puts a dated
+                        notice on its own page. The page is never withdrawn.
 
 Environment:
   PUBLIC_POSTHOG_KEY   PostHog project key. When unset, no analytics snippet is
@@ -313,6 +322,68 @@ function fail(msg) {
   process.exit(1);
 }
 
+// -------------------------------------------------- the body's shape
+//
+// The gate above checks the front matter: title, date, byline, slug, sources.
+// It never looked at the body, and that is how a page shipped that rendered the
+// Paperclip document API response instead of the story — 9,711 bytes, a valid
+// h1, a valid byline, and the article trapped inside as an escaped string.
+// Grace's audit is the argument: the gate catches a bad byline and says nothing
+// about a bad body, which is a hole in the same gate.
+//
+// What this catches, and only this: a body that is a serialized data document
+// rather than prose. Concretely, a body that is one JSON object or array and
+// nothing else.
+//
+// The narrowness is deliberate, and it goes to `{` and `[` only rather than to
+// every JSON value. A story that opens with a brace, one that opens with a bracket,
+// and one that quotes JSON inside a fenced code block are all ordinary journalism,
+// and none can trip this: the test is that the ENTIRE body parses as one value, so
+// there is no prose left over to be a story. A bare scalar is not refused either,
+// because `"a pull quote"` is a normal paragraph opening and a gate that refuses
+// pull quotes gets deleted. The publisher of the offending page passed the check on
+// its front matter because the front matter was fine — the file is valid YAML
+// followed by an API response where markdown should be.
+//
+// This is a loud failure by design, not a warning. A warning on this shape would
+// be reported by nobody and would ship the same page again on the next commit.
+function bodyShapeError(body, file) {
+  const text = String(body ?? '').trim();
+  if (!text) return `${file}: the body is empty. A post with no body does not publish.`;
+  if (text[0] !== '{' && text[0] !== '[') return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // It starts like JSON and is not JSON. That is a story that opens with a
+    // brace, which is allowed, so it is not this gate's business.
+    return null;
+  }
+
+  // The whole body was one JSON value, so there is no article in it to render.
+  const shape = Array.isArray(parsed) ? 'a JSON array' : 'a JSON object';
+  const isDocumentResponse = !Array.isArray(parsed)
+    && typeof parsed.body === 'string'
+    && ('id' in parsed || 'issueId' in parsed || 'companyId' in parsed || 'key' in parsed);
+
+  if (isDocumentResponse) {
+    const inner = parsed.body.trim();
+    return `${file}: the body is a Paperclip document API response, not the article. `
+      + `The post renders as ${shape} and the story is trapped inside it as an escaped string, under the "body" key. `
+      + 'The front matter is valid, which is why the page looked like a working post. '
+      + 'Write the markdown that is the value of "body" here, and nothing else: no "id", no "companyId", no braces. '
+      + `This is where the response was written whole; nothing in this build read the wrong field, because nothing here selects one. `
+      + (inner ? `The text is still recoverable from the source file (${inner.length} characters between the "body" quotes).` : '');
+  }
+
+  const opener = Array.isArray(parsed) ? 'a bracket' : 'a brace';
+  return `${file}: the body is one JSON ${Array.isArray(parsed) ? 'array' : 'object'} with no prose in it, `
+    + 'so it is a data document rather than a story. '
+    + 'A post body has to be the markdown a reader reads. If this was meant to be prose that opens with '
+    + `${opener}, it has to be prose the whole way through, not valid JSON.`;
+}
+
 // ------------------------------------------------------------ discovery
 
 function walk(dir, out = []) {
@@ -354,6 +425,16 @@ const posts = files.map((f) => {
   // which is the exact defect this rule was added to remove.
   const badExpiry = expiryError(data, rel);
   if (badExpiry) fail(badExpiry);
+  // Same for `expired`, which the desk sets when a story stops being true before
+  // its window runs out. Held to the same standard on purpose: a misspelled flag
+  // that is ignored downstream is a stale story still being served as current.
+  const badExpired = expiredError(data, rel);
+  if (badExpired) fail(badExpired);
+  // The body is checked last, so a post that fails on shape is reported against
+  // front matter that is otherwise sound. Order is diagnostic only: the build
+  // stops at the first failure either way.
+  const badBody = bodyShapeError(body, rel);
+  if (badBody) fail(badBody);
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 
@@ -393,9 +474,33 @@ const { listed: listedPosts } = partition(posts, {
 // publication because a listing would be empty is a worse outcome than showing a
 // slightly older story, and the gate already refuses to publish a site with no
 // posts at all.
+//
+// The fallback may overrule the window and it may not overrule the desk.
+//
+// Overruling the window is the whole point: the post is old, and an old post that
+// may still be true is a better front page than a blank one, provided the page says
+// so. Every fallback card carries a dated flag and the page carries a notice, so the
+// reader is told rather than left to work out that the navigation link reading
+// "Latest" is a fallback.
+//
+// Overruling a declared `expired` would be the exact defect this work exists to
+// remove, in a new place. `expired:` is not a recency judgement; it is the desk
+// saying the story stopped being true on a named day. Resurrecting it onto the front
+// page — under "Latest", above the fold, in the feed — because it is merely recent
+// is how "the wall stands free and open 24 hours today and tomorrow" gets published
+// by the mechanism that was built to stop it. So a post that has declared itself
+// expired is never a fallback candidate, and if that leaves the fallback empty the
+// front page says it is empty.
 const listingWindowEmpty = listedPosts.length === 0;
-const fallbackPosts = listingWindowEmpty ? posts.slice(0, opts.listingDays) : [];
+const fallbackCandidates = posts.filter((p) => p.listing?.declaredExpired !== true);
+const fallbackPosts = listingWindowEmpty ? fallbackCandidates.slice(0, opts.listingDays) : [];
 const listing = listingWindowEmpty ? fallbackPosts : listedPosts;
+// The one case the fallback does not paper over: posts exist, and every one of them
+// has declared itself no longer current. Then there is nothing honest to put on the
+// front page and it says so, rather than reaching for a post the desk has said is
+// false. The archive still publishes in full; only the "Latest" page is empty, and
+// it is empty loudly.
+const listingEmpty = posts.length > 0 && listing.length === 0;
 
 // Everything that reports on the listing has to report one partition of the
 // archive: a post is on the front page or it is not, and the two counts add up
@@ -590,6 +695,164 @@ ${items}
 </section>`;
 }
 
+// ---------------------------------------------------------- the age notice
+//
+// Three reader-facing surfaces serve a post that is not current, and before this
+// none of them said so:
+//
+//   the post's own page      reached by link, bookmark, search, or a shared link
+//   the front page card      reached by our own navigation, labelled "Latest"
+//   feed.xml                 reached by a feed reader that already fetched it
+//
+// Only the first was reachable, and it was the loudest failure: a reader who
+// followed a link to "The Wall That Heals closes Sunday at the Belmont County
+// Fairgrounds" on Monday the 5th was told the wall "stands free and open 24
+// hours today and tomorrow" and that a reader "can still go tonight". The exhibit
+// shut Sunday the 4th at 14:00. The page was not withdrawn, and it should not be
+// — the archive is the record — but it also made a claim about the present that
+// was false, and a valid h1 and a valid byline made it look like a working post.
+//
+// So this is one notice, stated three times, in three lengths.
+//
+// The wording is doing a specific job, and it is not "label the page". A reader
+// needs four things, and a banner that supplies one of them is a third silent
+// success:
+//
+//   1. WHICH DAY this stopped being current. A date, not "this is old".
+//   2. WHAT KIND it is, because the two are different facts and a reader acts on
+//      them differently. Out of window is a statement about the calendar: the
+//      story may still be perfectly true. Declared expired is a statement about
+//      the story: it is no longer true.
+//   3. WHAT TO DO INSTEAD. Check the source named at the foot of the page. Every
+//      post in this archive carries named sources, so the instruction is always
+//      actionable.
+//   4. THAT THIS PAGE PROMISES NOTHING GOING FORWARD. The weather roundup in the
+//      archive already works this way and it is the pattern to copy: "an empty
+//      alert response is a statement about the moment of retrieval, not a
+//      standing guarantee." The notice makes the same move for dates and hours,
+//      so it cannot go stale in the way the story it sits above already did.
+//
+// Nothing here decides whether a post is stale. It reports a decision the build
+// has already made — the window in scripts/expiry.mjs, and the desk's own
+// `expired:` when it is set — and tells the reader. Changing the copy of a story
+// is the desk's call, not this build's.
+
+// Why this post is not current, or null when it is.
+//
+// The build already knows both answers before a page is written. It states them
+// here so the notice, the card flag, the feed and build-info.json cannot disagree
+// about the same post.
+function staleness(p) {
+  const reason = p.listing?.reason || null;
+  const declaredDay = p.listing?.declaredDay || null;
+  const declared = p.listing?.declaredExpired === true;
+  if (declared) {
+    return { kind: 'expired', declaredDay, since: declaredDay || null };
+  }
+  if (reason) {
+    return { kind: 'out-of-window', declaredDay: null, since: p.listing.expires || null };
+  }
+  return null;
+}
+
+// The long form, on the post's own page. Rendered above the body and below the
+// byline: low enough that the headline still leads, high enough that it is the
+// first thing read before the first present-tense sentence.
+function ageNotice(p) {
+  const s = staleness(p);
+  if (!s) return '';
+  const published = publicationDay(p.fm);
+
+  if (s.kind === 'expired') {
+    const head = s.since
+      ? `This story stopped being current on <time datetime="${esc(s.since)}">${esc(s.since)}</time>.`
+      : 'This story is no longer current.';
+    const because = s.since
+      ? `Published <time datetime="${esc(published)}">${esc(published)}</time>, and its subject ended on
+         <time datetime="${esc(s.since)}">${esc(s.since)}</time>. Every hour, place and date below
+         describes that day and not this one.`
+      : `Published <time datetime="${esc(published)}">${esc(published)}</time> and marked no longer
+         current by the newsroom. The newsroom has not given a single day for it, so treat
+         everything below as the state of things on the publication date.`;
+    return `<aside class="age-notice" role="note" aria-label="This story is no longer current">
+  <p class="age-notice-head">${head}</p>
+  <p>${because}</p>
+  <p>The text is left exactly as published, because it is the record of what Belmont News
+  said. Nothing on this page is a standing claim about today. If you are deciding something on
+  the strength of it, ${sourcesPrompt(p)}</p>
+</aside>`;
+  }
+
+  return `<aside class="age-notice" role="note" aria-label="This story is in the archive">
+  <p class="age-notice-head">This is the archive, not the news.</p>
+  <p>Published <time datetime="${esc(published)}">${esc(published)}</time>. The front page carries
+  only the last ${esc(opts.listingDays)} news days, so this story has aged out of it. It may still be
+  accurate; it is simply no longer what the newsroom is reporting.</p>
+  <p>Every date, time and place below is what was true on
+  <time datetime="${esc(published)}">${esc(published)}</time>, written down that day, and it is not
+  updated afterwards. Nothing on this page is a standing claim about today. If you are deciding
+  something on the strength of it, ${sourcesPrompt(p)}</p>
+</aside>`;
+}
+
+// "the source named at the foot of this page", phrased as a link when the post has
+// named sources to link to. Every post in the archive has to, or the build stops,
+// so this is never a dead end — but it degrades to plain text rather than
+// producing a link to nowhere if the shape ever changes.
+function sourcesPrompt(p) {
+  const n = Array.isArray(p.fm.sources) ? p.fm.sources.length : 0;
+  if (!n) return 'check the source this story names before you act on it.';
+  const one = n === 1;
+  return `check ${one ? 'the source named' : 'the sources named'} at the foot of this page before you act on it.`;
+}
+
+// The short form, on a front-page card. One line, dated, linking to the long form
+// on the post's own page.
+//
+// This exists because of the fallback path, and that is the whole reason it is
+// here. When no post falls inside the listing window the build fills the front
+// page with the newest posts so it is not blank — a decision that was already made
+// and is still correct — and those posts are, by construction, all out of window.
+// They were therefore the least signalled posts on the site: not in the listing by
+// the window's own rule, yet on the front page under a navigation link reading
+// "Latest". The instance a reader hits first was the least marked one.
+function ageFlag(p) {
+  const s = staleness(p);
+  if (!s) return '';
+  const label = s.kind === 'expired'
+    ? (s.since ? `No longer current since ${s.since}` : 'No longer current')
+    : `From the archive, published ${publicationDay(p.fm)}`;
+  return ` <span class="age-flag">${esc(label)}</span>`;
+}
+
+// The front page's own notice, when the fallback is running.
+//
+// Every card below is flagged, so this is not strictly needed. It is here because
+// the fallback changes the meaning of the page as a whole, not of any one card: the
+// heading says "Latest" and on this day nothing here is latest. Saying that once,
+// at the top, is what stops the page from reading as current news with footnotes.
+function listingNotice() {
+  if (!listingWindowEmpty) return '';
+  if (listingEmpty) {
+    return `<aside class="age-notice age-notice-listing" role="note" aria-label="No story is current">
+  <p class="age-notice-head">Nothing on this page is current.</p>
+  <p>Every story in the archive has been marked no longer current by the newsroom, so
+  there is nothing to show under <strong>Latest</strong>. The archive itself is unchanged
+  and every story is still where it was, with its publication date and its sources.</p>
+</aside>`;
+  }
+  return `<aside class="age-notice age-notice-listing" role="note" aria-label="Nothing has been filed inside the listing window">
+  <p class="age-notice-head">Nothing has been filed inside the listing window for
+  <time datetime="${esc(NEWSROOM_TODAY)}">${esc(NEWSROOM_TODAY)}</time>.</p>
+  <p>The front page carries the last ${esc(opts.listingDays)} news days, counting a post's own day.
+  No post falls inside that window today, so this page is showing the
+  ${esc(fallbackPosts.length)} newest ${fallbackPosts.length === 1 ? 'story' : 'stories'} in the archive
+  instead. Each one is dated below.</p>
+  <p>These are not the current news, and this site does not present them as such anywhere else.
+  Each story's own page carries its publication date and the sources it rests on.</p>
+</aside>`;
+}
+
 function postPage(p) {
   const fm = p.fm;
   const body = `
@@ -598,6 +861,7 @@ function postPage(p) {
   <h1>${esc(fm.title)}</h1>
   ${fm.dek ? `<p class="dek">${esc(fm.dek)}</p>` : ''}
   <p class="byline">By <strong>${esc(fm.byline)}</strong> · <time datetime="${esc(fm.date)}">${esc(fm.date)}</time></p>
+  ${ageNotice(p)}
   <div class="post-body">
 ${markdown(p.body)}
   </div>
@@ -618,6 +882,13 @@ ${markdown(p.body)}
 // still exists, and it is still in sitemap.xml, so nothing a reader can reach
 // disappears and nothing a search engine was promised is withdrawn.
 //
+// One exception to "a post that has aged out is not a card here", and it is the
+// fallback below: when nothing falls inside the window, the newest posts are shown
+// anyway so the page is not blank. Every card is then dated and flagged, and the
+// page carries a notice saying the whole listing is archive. The fallback is the
+// right answer to an empty front page and the wrong answer to a front page that
+// claims to be current news, so it gets both.
+//
 // The heading says "Latest" either way. When the window came up empty and the
 // fallback filled the page, the build warns on stderr and records
 // `listing.fallback` in build-info.json rather than putting a caveat on the front
@@ -625,7 +896,7 @@ ${markdown(p.body)}
 function homePage() {
   const cards = listing.map((p) => `
   <article class="card">
-    <p class="kicker">${esc(EDITION_LABEL[p.fm.edition] || p.fm.edition || 'News')}${p.fm.column ? ` · ${esc(p.fm.column)}` : ''} · <time datetime="${esc(p.fm.date)}">${esc(p.fm.date)}</time></p>
+    <p class="kicker">${esc(EDITION_LABEL[p.fm.edition] || p.fm.edition || 'News')}${p.fm.column ? ` · ${esc(p.fm.column)}` : ''} · <time datetime="${esc(p.fm.date)}">${esc(p.fm.date)}</time>${ageFlag(p)}</p>
     <h2><a href="${esc(key(p.url))}">${esc(p.fm.title)}</a></h2>
     ${p.fm.dek ? `<p class="dek">${esc(p.fm.dek)}</p>` : ''}
     <p class="byline">By ${esc(p.fm.byline)}</p>
@@ -634,9 +905,10 @@ function homePage() {
   const body = `
 <h1 class="page-title">Belmont News</h1>
 <p class="lede">Independent local news for Belmont County, Ohio. Morning edition at 06:00, evening edition at 20:00, America/New_York.</p>
-<section class="feed">
+${listingNotice()}
+${listing.length ? `<section class="feed">
 ${cards}
-</section>`;
+</section>` : '<p class="empty">No story is current. The archive is below the fold of the search engines and every story still resolves at its own address.</p>'}`;
   return shell({ title: 'Belmont News — Belmont County, Ohio', description: 'Independent local news for Belmont County, Ohio.', body, canonical: abs('') });
 }
 
@@ -682,7 +954,7 @@ function feed() {
     <guid isPermaLink="true">${esc(abs(p.url))}</guid>
     <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>
     <author>${esc(p.fm.byline)}</author>
-    <category>${esc(p.fm.category || 'news')}</category>
+    <category>${esc(p.fm.category || 'news')}</category>${staleness(p) ? '\n    <category>archive</category>' : ''}
     <description>${esc(p.fm.dek || '')}</description>
   </item>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -741,8 +1013,13 @@ if (opts.check) {
   process.stdout.write(`build.mjs: ${posts.length} post(s) valid, nothing written (--check)\n`);
   process.stdout.write(`build.mjs: newsroom today ${NEWSROOM_TODAY}, listing window ${opts.listingDays} day(s), ${listing.length} listed, ${expiredForListing.length} expired\n`);
   for (const p of posts) {
-    const mark = listingUrls.has(p.url) ? 'listed  ' : `expired ${p.listing.expires}`;
+    const mark = listingUrls.has(p.url)
+      ? (staleness(p) ? `listed* ${p.listing.reason || 'fallback'}` : 'listed  ')
+      : `expired ${p.listing.reason || p.listing.expires}`;
     process.stdout.write(`build.mjs:   ${mark}  ${p.url}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
+  }
+  if (listing.some((p) => staleness(p))) {
+    process.stdout.write(`build.mjs:   listed* is on the page as a fallback and carries a dated notice; it is not current news\n`);
   }
   if (corrections.logs.length) {
     process.stdout.write(`build.mjs: ${corrections.logs.length} corrections log(s) valid\n`);
@@ -822,9 +1099,38 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
     listed: listing.length,
     expired: expiredForListing.length,
     fallback: listingWindowEmpty,
+    // True when the fallback had nothing honest left to show: every post has
+    // declared itself no longer current. The front page is empty and says so.
+    empty: listingEmpty,
     // Every post stays rendered and stays in the sitemap whatever it says here.
     // This block records the listing decision and nothing else.
     expiredUrls: expiredForListing.map((p) => `/${p.url}`),
+    // Why each post is on or off the page, per post. `reason` is the field the
+    // audits asked for and the one `--check` prints: a post can leave the listing
+    // for two different reasons, and until they are told apart "expired" reads as
+    // one thing.
+    //
+    //   out-of-window        aged out of the calendar window. May still be true.
+    //   window-override      aged out by its own `expires:` front matter.
+    //   declared-expired     aged out because the desk said the story is no longer
+    //                        current, which the window would not have caught.
+    //   fallback             off the window but ON the page, because nothing
+    //                        filed fell inside it. This is the case that had no
+    //                        marker at all, on the page a reader lands on first.
+    posts: posts.map((p) => {
+      const s = staleness(p);
+      return {
+        url: `/${p.url}`,
+        date: p.fm.date,
+        listed: listingUrls.has(p.url),
+        expires: p.listing.expires,
+        reason: p.listing.reason,
+        declaredExpired: p.listing.declaredExpired,
+        declaredDay: p.listing.declaredDay,
+        fallbackListed: listingUrls.has(p.url) && Boolean(s),
+        notice: s ? s.kind : null,
+      };
+    }),
   },
   correctionsDir: relative(HERE, corrections.dir),
   correctionsFiles: corrections.logs.length,
@@ -851,11 +1157,14 @@ try {
 process.stdout.write(`build.mjs: built ${posts.length} post(s) into ${opts.out}\n`);
 for (const p of posts) process.stdout.write(`build.mjs:   ${key(p.url)}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
 process.stdout.write(`build.mjs: listing ${listing.length} listed, ${expiredForListing.length} expired, newsroom day ${NEWSROOM_TODAY}, window ${opts.listingDays} day(s)\n`);
-for (const p of expiredForListing) process.stdout.write(`build.mjs:   expired ${p.listing.expires} (${p.listing.from})  ${key(p.url)}\n`);
+for (const p of expiredForListing) process.stdout.write(`build.mjs:   expired ${p.listing.reason} ${p.listing.expires}  ${key(p.url)}\n`);
+for (const p of listing.filter((q) => staleness(q))) process.stdout.write(`build.mjs:   listed as fallback, carries a dated notice  ${key(p.url)}\n`);
 if (listingWindowEmpty) {
   process.stderr.write(
     `build.mjs: WARNING no post is inside the ${opts.listingDays}-day listing window for newsroom day ${NEWSROOM_TODAY}.\n`
-    + `build.mjs: WARNING the front page is showing the ${fallbackPosts.length} newest post(s) as a fallback.\n`
+    + (listing.length
+      ? `build.mjs: WARNING the front page is showing the ${fallbackPosts.length} newest post(s) as a fallback, each flagged as archive.\n`
+      : 'build.mjs: WARNING every post has declared itself no longer current, so the front page has nothing to show. The archive still publishes.\n')
     + 'build.mjs: WARNING every post page and every sitemap entry is unaffected. The archive is the record.\n',
   );
 }

@@ -197,6 +197,66 @@ th, td {
 th { font-weight: 600; border-bottom-width: 2px; white-space: nowrap; }
 tbody tr:hover { background: var(--accent-soft); }
 
+/* ------------------------------------------------- the age notice */
+
+/* On a post that is no longer current, and on the front page when the listing
+   fallback is running. The point is that it reads as part of the newspaper rather
+   than as a browser dialog: a rule above the first sentence, the same serif as the
+   story, no colour that the scheme has to invert.
+
+   A left rule rather than a filled block, because a filled block this wide sits
+   between the byline and the lede and pushes the story off the fold on a phone.
+   Nothing here is interactive, so nothing here takes focus. */
+.age-notice {
+  max-width: none;
+  margin: 1.75rem 0 0;
+  padding: 0.15rem 0 0.15rem 1.1rem;
+  border-left: 4px solid var(--accent);
+  font-family: var(--font-sans);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.age-notice p { margin: 0 0 0.7rem; }
+.age-notice p:last-child { margin-bottom: 0; }
+
+/* The claim being made about the page. Serif, not sans: this is the one line a
+   reader has to take in before the body copy starts talking about tonight. */
+.age-notice-head {
+  font-family: var(--font-serif);
+  font-size: 1.02rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* The dates inside the notice are the point of it, so they are not styled down to
+   the surrounding sans and made to disappear into the paragraph. */
+.age-notice time { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* The front page notice sits above the card grid, where there is no byline to
+   interrupt, so it can breathe and take the full measure. */
+.age-notice-listing { margin: 1.5rem 0 2rem; }
+
+/* On a card, one line, inline with the kicker. Not a block: the card already has
+   a title, a dek and a byline below it, and a fourth block of text on a two-line
+   card is what makes a newspaper front page look like a feed. */
+.age-flag {
+  display: inline-block;
+  margin-left: 0.35em;
+  padding: 0 0.35em;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--accent);
+  vertical-align: 0.08em;
+}
+
 /* ------------------------------------------------------- sources / fixes */
 
 .sources, .corrections {
