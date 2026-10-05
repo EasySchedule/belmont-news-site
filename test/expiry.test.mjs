@@ -309,7 +309,12 @@ test('an empty window never publishes an empty front page', () => {
     assert.match(r.stderr, /archive is the record/);
     assert.equal((r.home.match(/class="card"/g) || []).length, DEFAULT_LISTING_DAYS, 'the newest posts are shown instead');
     assert.equal(r.info.listing.fallback, true);
-    assert.equal(r.info.listing.expired, TWO_DAYS.length);
+    // The fallback posts are on the page, so they are listed and not also
+    // expired. The report is a partition of the archive, which is the invariant
+    // the real-archive check further down holds the build to.
+    assert.equal(r.info.listing.listed, DEFAULT_LISTING_DAYS);
+    assert.equal(r.info.listing.expired, TWO_DAYS.length - DEFAULT_LISTING_DAYS);
+    assert.equal(r.info.listing.listed + r.info.listing.expired, TWO_DAYS.length);
     assert.equal((r.sitemap.match(/<loc>/g) || []).length, TWO_DAYS.length + 2, 'the sitemap is unaffected either way');
   } finally {
     rmSync(r.root, { recursive: true, force: true });
@@ -345,12 +350,22 @@ test('the listing day is not taken from SOURCE_DATE_EPOCH', () => {
   //
   // The commit here is a week older than the newsroom day the build is told it
   // is. Under the wrong behaviour the post would still be listed, with no expiry.
+  //
+  // The archive needs a second post inside the window. With one post and none
+  // in range the window comes up empty, the listing falls back to the newest
+  // post, and that post is on the front page however the day was computed. The
+  // expiry this test is pinning would then never be reported, for the right
+  // reason on a wrong day, and the assertion would pass for the wrong reason on
+  // a wrong day too.
   const root = mkdtempSync(join(tmpdir(), 'belmont-sde-'));
   try {
     const content = join(root, 'content');
     const file = join(content, '2026', '10', '2026-10-02', 'nathan-beausoleil--sde.md');
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, `---\n${post({ date: '2026-10-02', slug: 'sde' })}\n---\n\nBody.\n`);
+    const fresh = join(content, '2026', '10', '2026-10-09', 'nathan-beausoleil--in-window.md');
+    mkdirSync(dirname(fresh), { recursive: true });
+    writeFileSync(fresh, `---\n${post({ date: '2026-10-09', slug: 'in-window' })}\n---\n\nBody.\n`);
     const out = join(root, 'dist');
     const r = spawnSync('node', [
       BUILD, '--content', content, '--out', out, '--site-url', 'https://example.test', '--newsroom-today', '2026-10-09',

@@ -173,7 +173,17 @@ jobs:
           LISTING: ${{ needs.listing.outputs.publish }}
         run: |
           echo "drift=${DRIFT} listing=${LISTING}"
-          gh workflow run pages.yml --ref main
+          # --repo is required, not decorative. This job has no checkout, on
+          # purpose: dispatching a workflow needs no source and no credentials.
+          # But `gh` resolves the target repository from the git remote of the
+          # working directory when --repo is absent, and with no checkout there
+          # is no remote to read. Without the flag every run that had a reason
+          # to publish died here on "fatal: not a git repository", after both
+          # checks had already decided to publish. That is the silent
+          # non-publish this whole workflow exists to prevent, reproducing in
+          # the last step: the store moves, both probes go red-to-publish, the
+          # deploy never happens, and the reader keeps the old edition.
+          gh workflow run pages.yml --ref main --repo "$GITHUB_REPOSITORY"
           echo "dispatched pages.yml"
 
   report:
