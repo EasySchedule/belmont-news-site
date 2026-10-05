@@ -828,6 +828,59 @@ function staleness(p) {
   return null;
 }
 
+// How many corrections are on record against this post, or 0.
+//
+// The shape is the one correctionsBlock() accepts, read from the same place: an
+// array of { date, correction }. Anything else, including `corrections:` with
+// nothing under it, counts as none — so the notice and the block cannot disagree
+// about whether this post has been corrected, which is the whole defect.
+function correctionCount(p) {
+  const n = p.fm.corrections;
+  return Array.isArray(n) && n.length ? n.length : 0;
+}
+
+// What the notice says about the text itself, once a correction exists.
+//
+// The two sentences this replaces were written for a page nobody had corrected.
+// "It is not updated afterwards" is false the moment a correction lands, and on
+// 2026-10-05 that was not hypothetical: the Wall That Heals page printed two
+// correction entries under a banner asserting nothing on it had ever been
+// updated. The board read that banner at 16:22Z, took it for the fix, and had to
+// reopen BEL-133 when the copy turned out to be unchanged. A banner that denies
+// a correction the same page prints is worse than no banner, because a banner
+// reads as an answer.
+//
+// So the notice takes its cue from the same front matter the block is rendered
+// from, in both branches. With entries, the text is as published except where a
+// correction is recorded, and the notice names the two places the record lives:
+// the Corrections block on the page, and the full log. The hedge is untouched —
+// "not a standing claim about today" is the sentence that lets a reader read the
+// page at all, and it is true with or without corrections.
+//
+// The clause returns the whole third paragraph's opening, so a post with no
+// corrections keeps the plain sentence, which on such a page is simply correct.
+function provenanceSentence(p, kind, published) {
+  const n = correctionCount(p);
+  const where = n
+    ? ` The Corrections block at the foot of this page carries the ${n === 1 ? 'correction' : `${n} corrections`}
+  made since publication, and the full log is at
+  <a href="${esc(key(correctionsIndexUrl))}">${esc(key(correctionsIndexUrl))}</a>.`
+    : '';
+
+  const claim = kind === 'expired'
+    ? (n
+      ? `The text is as published, except where a correction is recorded, because it is the record of what
+         Belmont News said.`
+      : `The text is left exactly as published, because it is the record of what Belmont News
+  said.`)
+    : `Every date, time and place below is what was true on
+  <time datetime="${esc(published)}">${esc(published)}</time>, written down that day${
+    n ? ', except where a correction is recorded.' : ', and it is not\n  updated afterwards.'}`;
+
+  return `${claim}${where} Nothing on this page is a standing claim about today. If you are deciding ${
+    kind === 'expired' ? 'something on\n  the strength of it, ' : 'something on the strength of it, '}${sourcesPrompt(p)}`;
+}
+
 // The long form, on the post's own page. Rendered above the body and below the
 // byline: low enough that the headline still leads, high enough that it is the
 // first thing read before the first present-tense sentence.
@@ -850,9 +903,7 @@ function ageNotice(p) {
     return `<aside class="age-notice" role="note" aria-label="This story is no longer current">
   <p class="age-notice-head">${head}</p>
   <p>${because}</p>
-  <p>The text is left exactly as published, because it is the record of what Belmont News
-  said. Nothing on this page is a standing claim about today. If you are deciding something on
-  the strength of it, ${sourcesPrompt(p)}</p>
+  <p>${provenanceSentence(p, 'expired', published)}</p>
 </aside>`;
   }
 
@@ -861,10 +912,7 @@ function ageNotice(p) {
   <p>Published <time datetime="${esc(published)}">${esc(published)}</time>. The front page carries
   only the last ${esc(opts.listingDays)} news days, so this story has aged out of it. It may still be
   accurate; it is simply no longer what the newsroom is reporting.</p>
-  <p>Every date, time and place below is what was true on
-  <time datetime="${esc(published)}">${esc(published)}</time>, written down that day, and it is not
-  updated afterwards. Nothing on this page is a standing claim about today. If you are deciding
-  something on the strength of it, ${sourcesPrompt(p)}</p>
+  <p>${provenanceSentence(p, 'out-of-window', published)}</p>
 </aside>`;
 }
 
