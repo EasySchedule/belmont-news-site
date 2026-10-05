@@ -369,6 +369,116 @@ test('both filing-rule filename forms publish the page the front matter names', 
   }
 });
 
+// ------------------------------------------------- a wrapped paragraph stays a paragraph
+
+// render() reads back dist/<slug>/, and the build writes the slug out of the
+// front matter, so a fixture has to carry the same slug in both places.
+function bodyAt(slug, body) {
+  return render(FRONT.replace('slug: belmont-county-three-day-weather-roundup', `slug: ${slug}`) + `\n${SOURCES}`, slug, body);
+}
+
+// A body line that begins with a digit and a period is not a list. The Wall
+// That Heals story wraps to
+//
+//   The presenting sponsor is American Legion St. Clairsville Post
+//   159. The host committee lists its sponsors in tiers.
+//
+// and "159." matched the ordered-marker regex, so the renderer cut the
+// sentence at "Post", stripped the number, and published the rest of the
+// paragraph as a one-item <ol> followed by an orphan <p>. Both halves are
+// asserted here, because either one alone would have passed.
+
+test('a wrapped paragraph that begins with a number is not a list', () => {
+  const body = [
+    'The national partner on the Belmont County stop is the Vietnam Veterans',
+    'Memorial Fund. The presenting sponsor is American Legion St. Clairsville Post',
+    '159. The host committee lists its sponsors in tiers. The Freedom Sponsors are',
+    'Belmont County, Ohio, Belmont County Fair and Rotary of St. Clairsville.',
+    '',
+  ].join('\n');
+  const r = bodyAt('wall-that-heals-st-clairsville', body);
+  assert.equal(r.code, 0, r.stderr);
+
+  // 1. the sentence is whole, and agrees with the source note on the same page
+  assert.match(
+    r.html,
+    /<p>The national partner on the Belmont County stop is the Vietnam Veterans Memorial Fund\. The presenting sponsor is American Legion St\. Clairsville Post 159\./,
+    'the sponsor number was cut out of the sentence',
+  );
+  // 2. the whole paragraph is one <p>, and no list was invented around it
+  assert.doesNotMatch(r.html, /<ol>/, 'a wrapped paragraph opened an ordered list');
+  const paras = r.html.match(/<p>The national partner[\s\S]*?<\/p>/g) || [];
+  assert.equal(paras.length, 1, 'the paragraph was split into more than one block');
+  assert.match(paras[0], /Belmont County Fair and Rotary of St\. Clairsville\./);
+});
+
+// The complement of the rule above: at the top of a block, a list that starts
+// at a number other than 1 is still a list. Without this the fix could pass by
+// simply refusing to recognise an ordered list at all.
+test('an ordered list that starts above 1 still opens a list', () => {
+  const body = ['## Two runners-up', '', '3. Third place.', '4. Fourth place.', ''].join('\n');
+  const r = bodyAt('runners-up', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<ol><li>Third place\.<\/li><li>Fourth place\.<\/li><\/ol>/);
+});
+
+// The blank line matters here. With one, the paragraph is already flushed by the
+// time "1." arrives and the assertion is satisfied by the para.length === 0
+// branch, so the case proves nothing about interrupting. Without one, the only
+// thing that can make this an <ol> is the start-at-1 rule itself.
+test('an ordered list starting at 1 still interrupts a paragraph', () => {
+  const body = [
+    'A lead paragraph that runs on',
+    'across two lines.',
+    '1. First item.',
+    '2. Second item.',
+    '',
+  ].join('\n');
+  const r = bodyAt('interrupting-list', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<ol><li>First item\.<\/li><li>Second item\.<\/li><\/ol>/);
+  assert.match(r.html, /<p>A lead paragraph that runs on across two lines\.<\/p>/);
+});
+
+// CommonMark lets an unordered list interrupt a paragraph as long as its first
+// item is not empty. The start-at-1 rule above belongs to ordered lists only.
+// When the two were conflated, this body rendered as one paragraph with the
+// bullets typed inline, and nothing in the store did it yet to catch it.
+test('an unordered list interrupts a paragraph with no blank line before it', () => {
+  const body = [
+    'The tier list reads as follows, and the tiers are',
+    '- Freedom Sponsors, which include Belmont County',
+    '- Tribute Sponsors, which include UPMC',
+    '',
+  ].join('\n');
+  const r = bodyAt('tier-list', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(
+    r.html,
+    /<ul><li>Freedom Sponsors, which include Belmont County<\/li><li>Tribute Sponsors, which include UPMC<\/li><\/ul>/,
+    'the bullets stopped being bullets',
+  );
+  assert.match(r.html, /<p>The tier list reads as follows, and the tiers are<\/p>/);
+  assert.doesNotMatch(r.html, /tiers are - /, 'a bullet was typed inline into the paragraph');
+});
+
+// An ordered marker indented under an open paragraph is the same rule with
+// leading whitespace. The marker pattern accepts ^\s*, so the interrupt test has
+// to as well, or an indented "1." becomes paragraph text while a flush one does
+// not.
+test('an indented 1. still interrupts a paragraph', () => {
+  const body = [
+    'The host committee lists its sponsors in tiers',
+    '  1. Freedom Sponsors',
+    '  2. Tribute Sponsors',
+    '',
+  ].join('\n');
+  const r = bodyAt('indented-interrupting-list', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<ol><li>Freedom Sponsors<\/li><li>Tribute Sponsors<\/li><\/ol>/);
+  assert.match(r.html, /<p>The host committee lists its sponsors in tiers<\/p>/);
+});
+
 // ------------------------------------------------------- the reader sees a correction
 
 // Build a corrections log in a temp tree and read back the month page the reader

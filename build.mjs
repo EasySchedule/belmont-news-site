@@ -242,9 +242,42 @@ function markdown(src) {
     }
 
     // lists
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+    //
+    // A line inside an open paragraph does not get to open a list just because
+    // it begins with a digit and a period. That is how a wrapped paragraph
+    // lost its tail: the body of the Wall That Heals story wraps
+    //
+    //   The presenting sponsor is American Legion St. Clairsville Post
+    //   159. The host committee lists its sponsors in tiers. ...
+    //
+    // and "159." matched this regex. The renderer then treated the rest of the
+    // paragraph as a one-item ordered list, cut the marker out of the sentence
+    // so the sponsor read "Post" with no number, and left the remaining tiers
+    // in an orphan paragraph. One wrapped line, three visible defects, and the
+    // sentence silently disagreed with the Sources block on the same page.
+    //
+    // CommonMark already draws this line, and the rule is the whole fix: a list
+    // may interrupt a paragraph only if it is unordered, or if it is ordered
+    // and starts at 1. So while a paragraph is open, an ordered marker is only
+    // honoured when it reads "1.". Outside a paragraph, at the top of a block,
+    // nothing changes: "3." still opens a list there.
+    //
+    // The start-at-1 restriction is an ordered-list rule and applies only to
+    // ordered markers. An unordered marker interrupts a paragraph whenever its
+    // first item is not empty, which is what CommonMark requires and what a
+    // writer who leaves off the blank line expects:
+    //
+    //   The tier list reads as follows, and the tiers are
+    //   - Freedom Sponsors, which include Belmont County
+    //
+    // Gating "1." on the marker test below, rather than on the marker type,
+    // inlined those bullets into the sentence above them. So decide whether the
+    // line is ordered first, then apply the rule to that answer.
+    const orderedMarker = /^\s*\d+\./.test(line);
+    const interruptible = para.length === 0 || !orderedMarker || /^\s*1\.\s+/.test(line);
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line) && interruptible) {
       flushParagraph(para);
-      const ordered = /^\s*\d+\./.test(line);
+      const ordered = orderedMarker;
       const items = [];
       while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
         items.push(lines[i++].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
