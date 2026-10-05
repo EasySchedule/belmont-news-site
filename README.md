@@ -308,12 +308,15 @@ front page and still report green every fifteen minutes.
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
 | `scripts/check-listing-stale.mjs` | Answers "was the front page built for an earlier newsroom day?" and exits 0/1/2. |
+| `scripts/check-hosts.mjs` | Answers "does each host in the record serve our content, not merely answer 200?" and exits 0/1/2. |
+| `hosts.json` | The deploy record's host table, machine-readable. The check reads this, not the README. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
 | `test/expiry.test.mjs` | The listing window, and the four surfaces it does and does not touch. |
 | `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
 | `test/listing-stale.test.mjs` | The listing-staleness check, and its refusal cases. |
+| `test/host-content.test.mjs` | The host-content check: a 200 serving the wrong bytes must fail, and stay distinct from unreachable. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
 | `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over. |
@@ -474,4 +477,37 @@ Neither host can be settled from this repository alone: pausing or removing the 
 a Netlify credential. Until one exists, the repo-side fix above is the whole of what is available.
 
 A failing gate stops both, because the gate runs before the upload step.
+
+### Does each host actually serve us? (`scripts/check-hosts.mjs`)
+
+**A status code is not evidence that a host is alive.** `belmont-county-news-b68j.bolt.host`
+answers **HTTP 200** with an 8478-byte body that is Bolt's "Website Not Found" page. A checker
+that asks only "did it answer?" reports a dead host as healthy, which is the most likely mechanism
+behind this section having been wrong: the record asserted hosts were fine because they answered,
+and nothing ever checked what they served. That mistake was reported outward twice on 2026-10-05 —
+once as a site-wide outage that was really one dead host, once as the site being down when it was
+published on a second host.
+
+`hosts.json` is the table above in a form a program can check, and `scripts/check-hosts.mjs` reads
+it. Every host is asserted on content, never on a status code:
+
+| Host | Asserted on |
+|---|---|
+| `github-pages` | `/build-info.json` parses, `contentHead` is 40 hex, and it equals the store's `main` |
+| `netlify` | the same marker, but staleness is reported rather than failed — it is not the publish path |
+| `bolt-app` | HTML containing `<title>Belmont County News WebApp</title>`, and **not** "Website Not Found" |
+| `bolt-county-dead` | asserted **dead**: if it ever serves our markers again, the check fails |
+
+```
+node scripts/check-hosts.mjs         # 0 all hosts served us, 1 a host served the wrong thing, 2 could not tell
+```
+
+Exit 1 and exit 2 are separate on purpose. A host answering 200 with the wrong body is a durable
+fact about that host; an unreachable host is a fact about this run. Merging them is how a network
+blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
+failure line names the host and the marker, so the log says which thing broke.
+
+All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
+or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`
+covers it, including a test that fails if the record ever grows a `expectedStatus`-style field.
 
