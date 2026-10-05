@@ -1,4 +1,4 @@
-<!-- Source of truth: the `sources` document on BEL-1. Generated from BEL-1 sources revision 19 (2026-10-05), revision id ddf80dad-a24c-4301-b871-a8522b071493. Do not hand-edit this file; correct the document and regenerate with `node scripts/sync-source-desk.mjs`. -->
+<!-- Source of truth: the `sources` document on BEL-1. Generated from BEL-1 sources revision 20 (2026-10-05), revision id cbf84eff-a702-4656-bd58-db98df30586e. Do not hand-edit this file; correct the document and regenerate with `node scripts/sync-source-desk.mjs`. -->
 
 # Belmont News — the source desk
 
@@ -230,8 +230,8 @@ So:
    mirror for six hours of stories on the strength of a 200.
 3. **Write down the body size too.** Every status code in this document sits next to a byte count.
    A 200 that returns 5,265 bytes of error page is not a page.
-4. **When a source comes back, re-fetch the body before you trust it.** The ODOT outage is a CDN
-   cache, and that cache clears without warning.
+4. **When a source comes back, re-fetch the body before you trust it.** A cached error document
+   clears without warning, so the first fetch proves nothing about the second.
 5. **A body is not an identity.** Steps 1-4 catch a dead host. They do **not** catch the entries that
    were alive, well-built and confidently wrong: `thebcpl.org` was a healthy 80 KB website for
    **Broome County Public Library in Binghamton, New York**; `theintelligencer.com` is a real
