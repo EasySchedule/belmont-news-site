@@ -608,26 +608,40 @@ fact about that host; an unreachable host is a fact about this run. Merging them
 blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
 failure line names the host and the marker, so the log says which thing broke.
 
-**Behind is not stale, and the difference is the window.** A merge to the store does not publish;
-the `*/15` cron does, and GitHub queues it. So for the first minutes after a merge the publish path
-is *supposed* to be behind, and a check that exits 1 for that goes red on every merge. The first
-version of this script did exactly that, which is the disease it was written to cure: a check that
-is red most of the time is a check nobody reads. A mismatch is therefore a failure only once the
-store commit is older than the publish window -- 30 minutes by default, the cron plus one missed
-slot, overridable with `PUBLISH_WINDOW_MINUTES`. Inside the window the host is reported `BEHIND`
-and exits 0:
+**A mismatch is a failure, including when the served head is an ancestor of the expected one.**
+`build-info.json` carries the store commit the page was rendered from, so the assertion is on that
+commit and on nothing else. Not the status code, not `generated` or `contentSyncedAt`, and not the
+cache headers -- on 2026-10-05 the publish path served an ancestor of the store head while
+reporting `x-cache: HIT` with `age: 9` and a plausible `generated` time, and a version of this
+check that treated a young store commit as "still publishing" called all of that fine.
+
+Which kind of wrong it is comes from the store's real history, fetched anonymously:
+
+| Verdict | Served head | Meaning |
+|---|---|---|
+| `STALE` | an ancestor of the expected head | an older edition is live |
+| `WRONG` | in the store, not an ancestor | not built from this branch |
+| `WRONG` | not a commit in the store at all | something else is served under our URL |
+| `UNKNOWN` | history unreadable, so unclassifiable | exit 2, never a pass |
+
+The age of the store head is printed on the failure line, because "a merge from four minutes ago
+the cron has not seen yet" and "the store has been ahead since Tuesday" are the same exit code and
+different responses. It does not get a vote on the verdict.
+
+Every failure line names the head it actually served, in full, and the timestamp it claimed:
 
 ```
-check-hosts: BEHIND github-pages [publish-path] https://easyschedule.github.io/belmont-news-site
-check-hosts:        ... is BEHIND, not stale: rendered 2d09294f, store 29adf631 is 13 min old,
-                    inside the 30 min publish window. The cron has not run yet.
+check-hosts: STALE   github-pages [publish-path] https://easyschedule.github.io/belmont-news-site
+check-hosts:        ... served head 29adf631d9..., stamped 2026-10-05T17:40:46.670Z. It is an
+                    ancestor of store main 4164531c, so this page was built from an older commit
+                    of the store and is serving a stale edition. Store main is 4164531c and that
+                    head is 32 min old.
 ```
 
-Past the window the same host exits 1 and says it is stale. An age that cannot be read exits 2
-rather than being assumed young: guessing "still publishing" would convert an unknown into a
-pass, which is the one thing this check exists to prevent.
-
-All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
-or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`
-covers it, including a test that fails if the record ever grows a `expectedStatus`-style field.
+All reads are anonymous, so this needs no token and no credential, and `git` is invoked with
+credential helpers disabled and prompts off so it cannot acquire one. Run it by hand after any
+deploy, or any time someone is about to describe a host's health in prose.
+`test/host-content.test.mjs` covers it against a real commit graph over `file://`, including tests
+that fail if the record ever grows a `expectedStatus`-style field, if any header becomes part of
+the assertion, or if an age-based exemption comes back.
 
