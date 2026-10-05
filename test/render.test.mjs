@@ -8,8 +8,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -234,11 +234,16 @@ function builtPath(file) {
 
 test('every post in the committed content snapshot names its sources', () => {
   const out = mkdtempSync(join(tmpdir(), 'belmont-real-'));
+  // The archive is staged into a temp directory and built from the copy. One
+  // committed file is refused by the body gate added for BEL-161, because its body
+  // is a Paperclip document API response rather than the article, and it cannot
+  // render at all. This test is about sources, so it renders the rest and reports
+  // what it had to leave out rather than quietly covering less than it used to.
+  const staged = mkdtempSync(join(tmpdir(), 'belmont-real-content-'));
   try {
-    // Walk the committed snapshot instead of naming today's posts. A hardcoded
-    // list and a hardcoded count both rot on the next publish, and this test now
-    // runs on the publish path too: a fifth post would have failed the deploy
-    // over a stale number rather than over anything a reader would see.
+    const stagedContent = join(staged, 'content');
+    cpSync(join(REPO, 'content'), stagedContent, { recursive: true });
+
     const markdown = [];
     (function walk(dir) {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -246,16 +251,53 @@ test('every post in the committed content snapshot names its sources', () => {
         if (e.isDirectory()) walk(p);
         else if (e.name.endsWith('.md')) markdown.push(p);
       }
-    })(join(REPO, 'content'));
+    })(stagedContent);
     assert.ok(markdown.length > 0, 'the committed snapshot has no posts in it');
+    const committed = markdown.length;
 
-    const stdout = execFileSync('node', [BUILD, '--content', 'content', '--out', out, '--site-url', 'https://example.test'], {
+    // build.mjs stops at the first refusal, so each pass names one file. The name it
+    // prints is relative to its own working directory, which is not the staged
+    // directory, so keep only the part under content/ and join it back.
+    const blocked = [];
+    for (let pass = 0; pass < 20; pass++) {
+      const gate = spawnSync('node', [BUILD, '--content', stagedContent, '--check'], { cwd: REPO, encoding: 'utf8' });
+      if (gate.status === 0) break;
+      const m = /build\.mjs: ([^:]+\.md):/.exec(gate.stderr || '');
+      if (!m) throw new Error(`the body gate failed without naming a file:\n${gate.stderr}`);
+      const parts = m[1].split(/[/\\]/).slice(-4);
+      if (parts.length !== 4) throw new Error(`cannot resolve ${m[1]} against the staged archive`);
+      const file = parts.join('/');
+      if (blocked.includes(file)) throw new Error(`the body gate named ${file} twice without advancing`);
+      blocked.push(file);
+      rmSync(join(stagedContent, ...parts));
+    }
+    assert.deepEqual(
+      blocked, [],
+      `the committed archive cannot be published. ${blocked.length} file(s) are refused by the body gate:\n`
+      + blocked.map((f) => `  ${f}`).join('\n')
+      + '\nReplace the body of each with the markdown, not the document record.',
+    );
+
+    const buildable = (function walk(dir) {
+      const found = [];
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) found.push(...walk(p));
+        else if (e.name.endsWith('.md')) found.push(p);
+      }
+      return found;
+    })(stagedContent);
+
+    const stdout = execFileSync('node', [BUILD, '--content', stagedContent, '--out', out, '--site-url', 'https://example.test'], {
       cwd: REPO,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    assert.match(stdout, new RegExp(`built ${markdown.length} post\\(s\\)`));
-    for (const file of markdown) {
+    assert.match(stdout, new RegExp(`built ${buildable.length} post\\(s\\)`));
+    assert.equal(buildable.length, committed, 'no post is dropped from this test without saying so');
+    for (const file of buildable) {
+      // The same derivation every other test uses: build.mjs writes to
+      // date/slug out of the front matter, so ask the front matter.
       const p = builtPath(file);
       const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
       const s = sourcesSection(html);
@@ -266,6 +308,7 @@ test('every post in the committed content snapshot names its sources', () => {
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
+    rmSync(staged, { recursive: true, force: true });
   }
 });
 

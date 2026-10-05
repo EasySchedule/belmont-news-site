@@ -10,13 +10,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { calendarDay, addDays, NEWSROOM_TZ } from '../scripts/dates.mjs';
-import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, isCalendarDay, publicationDay } from '../scripts/expiry.mjs';
+import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, expiredError, declaredExpired, declaredExpiryField, isCalendarDay, publicationDay } from '../scripts/expiry.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD = join(REPO, 'build.mjs');
@@ -160,6 +160,80 @@ test('a post with a bad expires fails the build instead of being listed forever'
   );
   assert.equal(r.code, 1);
   assert.match(r.stderr, /expires must be a real calendar day/);
+});
+
+// ------------------------------------------- declared expiry (BEL-161)
+//
+// The window above is a question about the calendar. `expired` is a question
+// about the story, and the Wall That Heals exhibit is the case that needs both:
+// published 2026-10-03, shut Sunday 2026-10-04 at 14:00, and on Monday the 5th it
+// was inside its own two-day window, on the front page, in the feed, telling a
+// reader it "closes tonight". No window rule can catch that, because by the
+// window's own definition the post was current.
+
+test('a declared expired day is not in force until that day arrives', () => {
+  const fm = { date: '2026-10-03', expired: '2026-10-04' };
+  // Before the day: nothing changes at all. This is the whole reason a day is
+  // accepted rather than only `true` — the flag has to be writable on publication
+  // day, because the moment a story goes stale nobody is watching.
+  assert.deepEqual(declaredExpired(fm, { today: '2026-10-03' }), { expired: false, declaredDay: '2026-10-04', from: 'front-matter' });
+  assert.deepEqual(declaredExpired(fm, { today: '2026-10-04' }), { expired: true, declaredDay: '2026-10-04', from: 'front-matter' });
+  assert.deepEqual(declaredExpired(fm, { today: '2026-10-05' }), { expired: true, declaredDay: '2026-10-04', from: 'front-matter' });
+});
+
+test('expired true is in force at once, and names no day it does not have', () => {
+  const fm = { date: '2026-10-03', expired: true };
+  assert.deepEqual(declaredExpired(fm, { today: '2026-10-03' }), { expired: true, declaredDay: null, from: 'front-matter' });
+  assert.deepEqual(fm.expired, true);
+});
+
+test('an absent, empty or false expired field makes no claim and is not an error', () => {
+  for (const fm of [{ date: '2026-10-03' }, { date: '2026-10-03', expired: '' }, { date: '2026-10-03', expired: false }]) {
+    assert.equal(declaredExpiryField(fm), null, JSON.stringify(fm));
+    assert.equal(expiredError(fm, 'p.md'), null, JSON.stringify(fm));
+    assert.equal(listingExpiry(fm, { today: '2026-10-03' }).declaredExpired, false);
+  }
+});
+
+test('a misspelled expired is refused, because an ignored flag is worse than none', () => {
+  // A flag that is silently dropped leaves the page reading as live and the source
+  // reading as expired, and nobody finds out until a reader is told an exhibit
+  // closes tonight three days after it shut.
+  for (const bad of ['yesterday', '2026-13-45', '2026-10-04T14:00:00-04:00', 'true-ish', '1']) {
+    const err = expiredError({ date: '2026-10-03', expired: bad }, 'p.md');
+    assert.match(err || '', /expired must be true or a real calendar day/, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('an expired before the post date is refused as a typo', () => {
+  const err = expiredError({ date: '2026-10-03', expired: '2026-10-02' }, 'p.md');
+  assert.match(err || '', /expired 2026-10-02 is before the post's own date 2026-10-03/);
+});
+
+test('a declared expired removes the post from the listing for a stated reason', () => {
+  const fm = { date: '2026-10-05', expired: '2026-10-05' };
+  const l = listingExpiry(fm, { today: '2026-10-05' });
+  assert.equal(l.listed, false, 'inside its own window and still not listed');
+  assert.equal(l.declaredExpired, true);
+  assert.equal(l.declaredDay, '2026-10-05');
+  assert.equal(l.reason, 'declared-expired', 'the reason is the desk, not the calendar');
+});
+
+test('declared-expired outranks out-of-window when a post is both', () => {
+  // The window would have caught it anyway. The declaration is the fact that the
+  // window did not need, so it is the one worth reporting.
+  const l = listingExpiry({ date: '2026-10-02', expired: '2026-10-03' }, { today: '2026-10-05' });
+  assert.equal(l.listed, false);
+  assert.equal(l.reason, 'declared-expired');
+});
+
+test('a post with a bad expired fails the build rather than being served as current', () => {
+  const r = buildFixture(
+    [{ date: '2026-10-02', slug: 'broken-expired', extra: 'expired: last tuesday' }],
+    { today: '2026-10-02' },
+  );
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /expired must be true or a real calendar day/);
 });
 
 // ------------------------------------------------- the newsroom day
@@ -378,8 +452,12 @@ test('the listing day is not taken from SOURCE_DATE_EPOCH', () => {
     // The window is judged against 2026-10-09, so a post dated 2026-10-02 fell out
     // on 2026-10-04. Had the commit time driven it, today would read 2026-10-02,
     // the post would be listed, and there would be no expiry line at all.
+    //
+    // The line states the reason, not the source. `out-of-window` is the window's
+    // own verdict; `window-override` means the post's own `expires:` did it;
+    // `declared-expired` means the desk said the story stopped being true.
     assert.match(r.stdout, /newsroom day 2026-10-09/);
-    assert.match(r.stdout, /expired 2026-10-04 \(default-window\)/);
+    assert.match(r.stdout, /expired out-of-window 2026-10-04/);
     assert.equal(JSON.parse(readFileSync(join(out, 'build-info.json'), 'utf8')).listing.newsroomToday, '2026-10-09');
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -411,15 +489,60 @@ test('the committed archive stays inside the window on any day it is built', () 
   // Sanity, not a pin: whatever day this runs, the build reports a listing, and
   // every post still has a page. A change to this rule must never be able to
   // leave the archive unrendered.
-  const out = mkdtempSync(join(tmpdir(), "belmont-archive-"));
+  //
+  // One committed file does not survive the body gate added for BEL-161, because
+  // its body is a Paperclip document API response rather than the article. That is
+  // the gate working, not a failure of this rule, so the invariant below is proved
+  // over the rest of the archive and the blocked file is named on every run.
+  //
+  // The last assertion is the real one. It is red until that file is repaired, and
+  // that is deliberate: a suite that quietly dropped a broken post from its own
+  // coverage would be the third silent success on this issue.
+  const out = mkdtempSync(join(tmpdir(), 'belmont-archive-'));
+  const staged = mkdtempSync(join(tmpdir(), 'belmont-archive-content-'));
   try {
-    spawnSync('node', [BUILD, '--content', 'content', '--out', out, '--site-url', 'https://example.test'], {
+    // The archive is copied out and built from the copy. This test is not allowed
+    // to move a file in the repository to get a green run — a test that edits its
+    // own fixtures is a test that can delete the evidence.
+    const stagedContent = join(staged, 'content');
+    cpSync(join(REPO, 'content'), stagedContent, { recursive: true });
+
+    // Each pass validates the STAGED copy, so the loop converges: the file it refuses
+    // is the file it has just removed. Validating the repository instead would name
+    // the same file twenty times and never finish.
+    const gate = () => spawnSync('node', [BUILD, '--content', stagedContent, '--check'], { cwd: REPO, encoding: 'utf8' });
+    const blocked = [];
+    // build.mjs stops at the first refusal, so each pass names one file. Loop until
+    // the archive clears the gate, with a bound so a gate that starts refusing
+    // everything fails instead of hanging the suite.
+    for (let pass = 0; pass < 20; pass++) {
+      const r = gate();
+      if (r.status === 0) break;
+      const m = /build\.mjs: ([^:]+\.md):/.exec(r.stderr || '');
+      if (!m) throw new Error(`the body gate failed without naming a file:\n${r.stderr}`);
+      const rel = m[1].replace(/^.*?content\//, 'content/');
+      if (blocked.includes(rel)) throw new Error(`the body gate named ${rel} twice without advancing:\n${r.stderr}`);
+      blocked.push(rel);
+      rmSync(join(stagedContent, rel.replace(/^content\//, '')));
+    }
+
+    const r = spawnSync('node', [BUILD, '--content', stagedContent, '--out', out, '--site-url', 'https://example.test'], {
       cwd: REPO, encoding: 'utf8',
     });
+    assert.equal(r.status, 0, r.stderr);
     const info = JSON.parse(readFileSync(join(out, 'build-info.json'), 'utf8'));
     assert.match(info.listing.newsroomToday, /^\d{4}-\d{2}-\d{2}$/);
     assert.equal(info.listing.listed + info.listing.expired, info.posts, 'every post is either listed or expired, and none is lost');
+
+    assert.deepEqual(
+      blocked, [],
+      `the committed archive cannot be published. ${blocked.length} file(s) are refused by the body gate:\n`
+      + blocked.map((f) => `  ${f}`).join('\n')
+      + '\nReplace the body of each with the markdown, not the document record. The text is still '
+      + 'inside the file, under the "body" key.',
+    );
   } finally {
     rmSync(out, { recursive: true, force: true });
+    rmSync(staged, { recursive: true, force: true });
   }
 });
