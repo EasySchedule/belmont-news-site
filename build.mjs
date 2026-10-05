@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFile
 import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NEWSROOM_TZ, publicationInstant, buildEpochMs, calendarDay } from './scripts/dates.mjs';
-import { readCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
+import { readCorrections, reconcileCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
 import { DEFAULT_LISTING_DAYS, publicationDay, expiryError, expiredError, partition } from './scripts/expiry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -456,6 +456,17 @@ function fail(msg) {
   process.exit(1);
 }
 
+// A refusal that has to name more than one thing.
+//
+// fail() prefixes a single line, which reads correctly for one bad file and
+// swallows the rest of a list: the reader sees the first entry and no count, so
+// "five corrections were never applied" arrives as "something was wrong". Every
+// line is prefixed, the count is on the first one, and the exit is the same.
+function refuse(lines) {
+  for (const line of [].concat(lines)) process.stderr.write(`build.mjs: ${line}\n`);
+  process.exit(1);
+}
+
 // -------------------------------------------------- the body's shape
 //
 // The gate above checks the front matter: title, date, byline, slug, sources.
@@ -665,6 +676,22 @@ const NEWSROOM = process.env.TZ_FOR_DATES || NEWSROOM_TZ;
 const SHIPPED_AT = buildEpochMs(opts.buildEpoch);
 const corrections = readCorrections(resolve(opts.corrections));
 const postUrls = new Set(posts.map((p) => p.url));
+
+// The other direction, and the one that was missing.
+//
+// correctionPostRef() below asks "is the post this correction names in this
+// build?" and answers no with plain text rather than a dead link. That is
+// deliberate and stays. It says nothing about the opposite question: whether the
+// post the correction names says it was corrected. Nothing asked that, so a
+// correction could be logged, counted valid, published at /corrections/, and
+// linked from a page that rendered zero Corrections sections. BEL-313, five
+// entries, 2026-10-03.
+//
+// reconcileCorrections() is that question, and it is computed here rather than
+// inside correctionsBlock() because the answer is about the whole set of logs,
+// not about any one page. The rule, the date-only match, and why a missing post
+// stays a warning are documented on the function.
+const reconciliation = reconcileCorrections({ logs: corrections.logs, posts });
 
 // A correction names the post it corrects. Link it only when that post is in
 // this build; a correction can outlive the post it refers to, and a dead link
@@ -1330,6 +1357,49 @@ if (opts.check) {
   } else {
     process.stdout.write(`build.mjs: no corrections log found under ${corrections.dir} (the page still builds)\n`);
   }
+
+  // Every logged correction, and whether the post it names says so. This is
+  // printed before the refusal below rather than only inside it, so the count is
+  // readable on a run that passes and on one that does not. "7 correction(s)"
+  // above was, on 2026-10-05, the whole of what `--check` knew about them.
+  process.stdout.write(`build.mjs: corrections reconciled with the posts they name: ${reconciliation.reconciled}/${reconciliation.checked} entry(ies)\n`);
+  for (const w of reconciliation.unknownPost) {
+    process.stdout.write(`build.mjs:   warning  ${w.file}  ${w.postDate} — ${w.slug}  correction (${w.correctionDate}) names a post that is not in this build; the link is printed as plain text, which is deliberate\n`);
+  }
+
+  if (reconciliation.unreconciled.length) {
+    const n = reconciliation.unreconciled.length;
+    refuse([
+      `${n} logged correction(s) name a post that does not carry them. The corrections log is ahead of the copy:`,
+      '',
+      'A reader who reads a correction on /corrections/ follows the link to the post it',
+      'corrects and finds nothing there. correctionsBlock() renders only the front matter on',
+      'the post, so an unreconciled correction reaches the reader as a link that says nothing.',
+      'The log entry counts as valid and publishes at /corrections/, which is why this is a',
+      'refusal and not a warning.',
+      '',
+      'Add the correction to the post\'s own `corrections:` front matter, on the same date the',
+      'log records. The prose does not have to match the log; the date does. Do not delete the',
+      'log entry: the log is append-only, and the two are corrected together.',
+      '',
+      // Grouped by post and date, so the fix is readable: five entries naming one
+      // post are one line saying that post needs three entries dated 2026-10-02
+      // and two dated 2026-10-03, not five lines that look like five problems.
+      // The counts are per entry, never per date, because three different
+      // corrections on one day are three front-matter entries.
+      ...[...reconciliation.unreconciled.reduce((m, u) => {
+        const k = `${u.url}|${u.correctionDate}`;
+        if (!m.has(k)) m.set(k, { u, count: 0 });
+        m.get(k).count += 1;
+        return m;
+      }, new Map()).values()].map(({ u, count }) => {
+        const needed = Array.from({ length: count }, () => u.correctionDate).join(', ');
+        return `  /${u.url}  needs ${count} corrections front-matter entry(ies) dated ${needed}`
+          + (u.postDates.length ? `; it carries ${u.postDates.join(', ')}` : '; it carries none at all');
+      }),
+    ]);
+  }
+
   process.exit(0);
 }
 
@@ -1442,6 +1512,34 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
     entries: log.entries.length,
     title: log.title,
   })),
+  // How much of the log the posts in this build actually carry.
+  //
+  // The refusal in `--check` fires on this and `npm run build` does not, so a
+  // reader of the deployed /build-info.json can see an unreconciled log that was
+  // published anyway, and the entry count above can be read as "seven corrections
+  // exist" rather than "seven corrections reached a reader". Publishing the
+  // numbers is the difference between a site that is quietly out of sync and a
+  // site whose own build record says so.
+  correctionsReconciliation: {
+    checked: reconciliation.checked,
+    reconciled: reconciliation.reconciled,
+    unreconciled: reconciliation.unreconciled.map((u) => ({
+      file: u.file,
+      postDate: u.postDate,
+      slug: u.slug,
+      url: `/${u.url}`,
+      correctionDate: u.correctionDate,
+      postCorrectionDates: u.postDates,
+    })),
+    // A correction whose post is not in this build. Counted and printed, never
+    // refused: a correction is allowed to outlive its post.
+    postNotInBuild: reconciliation.unknownPost.map((w) => ({
+      file: w.file,
+      postDate: w.postDate,
+      slug: w.slug,
+      correctionDate: w.correctionDate,
+    })),
+  },
   feed: feedItems.map(({ post: p, publishedAt }) => ({
     url: `/${p.url}`,
     date: p.fm.date,
