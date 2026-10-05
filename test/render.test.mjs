@@ -303,7 +303,16 @@ function renderCorrections(log) {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      return { code: 0, stdout, stderr: '', html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8') };
+      return {
+        code: 0,
+        stdout,
+        stderr: '',
+        html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8'),
+        // The sitemap is written by this same build and carries the lastmod the
+        // tests below are about, so it is read here rather than by a second
+        // build with the same fixture.
+        sitemap: readFileSync(join(root, 'dist', 'sitemap.xml'), 'utf8'),
+      };
     } catch (e) {
       return { code: e.status, stdout: e.stdout || '', stderr: e.stderr || '', html: '' };
     }
@@ -403,4 +412,109 @@ ${entry('2026-10-02', 'first, printed \`NONE\`')}${entry('2026-10-02', 'second, 
   assert.match(texts[0], /first, printed <code>NONE<\/code>/);
   assert.match(texts[1], /second, printed 33 percent/);
   assert.match(texts[2], /third, printed <code>in_progress<\/code>/);
+});
+
+// ---------------------------------------------- what the sitemap tells a crawler
+//
+// The defect BEL-137 found. `lastmod` for /corrections/2026-10/ read
+// log.entries[0], and the log is append-only, so that is its OLDEST entry. Three
+// corrections appended on 2026-10-03 sat on a page the sitemap still dated
+// 2026-10-02, and the two they superseded are the entries a reader most needs to
+// reach. Not a cosmetic date.
+
+const correctionEntryFixture = (postDate, correctionDate, what) => `## ${postDate} — morning-briefing-${postDate}
+
+Correction (${correctionDate}): ${what}
+Published in: the 06:00 edition of Saturday ${postDate}.
+Corrected by: Rosalind Kimbrough.
+`;
+
+const lastmodFor = (sitemap, url) => {
+  const m = new RegExp(`<loc>https://example\\.test/${url}</loc>\\s*<lastmod>([^<]+)</lastmod>`).exec(sitemap);
+  return m ? m[1] : null;
+};
+
+test("a corrections page's lastmod is the newest correction on it, not the oldest", () => {
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'the first correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'the second correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-03', 'the third, superseding the first two')}`);
+  assert.equal(r.code, 0, r.stderr);
+  // The page really does carry the later correction, so a stale lastmod cannot be
+  // explained away by there being nothing newer to report.
+  assert.match(r.html, /Correction \(<time datetime="2026-10-03"/);
+  assert.equal(lastmodFor(r.sitemap, 'corrections/2026-10/'), '2026-10-03');
+});
+
+test('appending a newer correction moves lastmod forward with it', () => {
+  // On a log whose newest entry happens to be its first, the old code looked
+  // right. Growing that same log by one entry is what has to move the date, and
+  // this is the assertion that fails on main.
+  const one = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-02', 'the only one so far')}`);
+  const two = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-02', 'the only one so far')}
+${correctionEntryFixture('2026-10-03', '2026-10-03', 'appended a day later')}`);
+  assert.equal(one.code, 0, one.stderr);
+  assert.equal(two.code, 0, two.stderr);
+  assert.equal(lastmodFor(one.sitemap, 'corrections/2026-10/'), '2026-10-02');
+  assert.equal(lastmodFor(two.sitemap, 'corrections/2026-10/'), '2026-10-03', 'an appended correction must move the date a crawler reads');
+});
+
+test('no lastmod anywhere in the sitemap is a partial date', () => {
+  // `2026-10` is legal in the sitemap protocol and rejected or coerced by a
+  // number of parsers. It is what /corrections/ carried. A partial date in this
+  // document means the old fallback came back into use.
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'one correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const found = [...r.sitemap.matchAll(/<lastmod>([^<]+)<\/lastmod>/g)].map((m) => m[1]);
+  assert.ok(found.length, 'the fixture must produce at least one lastmod or this proves nothing');
+  for (const d of found) assert.match(d, /^\d{4}-\d{2}-\d{2}$/, `lastmod ${d} is not a full date`);
+});
+
+test('the corrections index carries the newest date on any month page beneath it', () => {
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'one correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'a later correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(lastmodFor(r.sitemap, 'corrections/'), '2026-10-04');
+});
+
+test('a log with no corrections omits lastmod rather than inventing one', () => {
+  // A log that names no correction has no modification date to report. lastmod is
+  // optional in the protocol, so the element is dropped rather than filled in
+  // with the month, which is how the partial date got there.
+  const r = renderCorrections('# Log\n\nNothing has been corrected yet.\n');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.sitemap, /<loc>https:\/\/example\.test\/corrections\/2026-10\/<\/loc>/, 'the month page is still published');
+  assert.equal(lastmodFor(r.sitemap, 'corrections/2026-10/'), null, 'no correction means no date to claim');
+});
+
+test("a post's own sitemap entry still carries its publish date", () => {
+  // The fix touches the two corrections URLs only. Post entries are correct as
+  // they stand and the expiry rule deliberately keeps expired posts in here, so
+  // this pins both facts while the corrections dates are being recomputed.
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'one correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(lastmodFor(r.sitemap, '2026-10-02/belmont-county-three-day-weather-roundup/'), '2026-10-02');
 });
