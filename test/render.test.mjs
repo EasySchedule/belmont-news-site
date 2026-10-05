@@ -224,11 +224,38 @@ test('every post in the committed content snapshot names its sources', () => {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     assert.match(stdout, new RegExp(`built ${markdown.length} post\\(s\\)`));
-    for (const file of markdown) {
-      // content/YYYY/MM/YYYY-MM-DD/author--slug.md renders to YYYY-MM-DD/slug.
-      const parts = file.split(sep);
-      const p = `${parts[parts.length - 2]}/${parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')}`;
-      const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
+
+    // Ask the build which pages it rendered, rather than reading the file names.
+    //
+    // This test used to derive each post's URL out of its file name, on the
+    // assumption that the store always names a post
+    // `author--slug.md`. build.mjs never made that assumption: it takes the URL
+    // from front matter (`date` and `slug`), so a file that does not follow the
+    // naming convention renders perfectly well and publishes correctly.
+    //
+    // The store got one on 2026-10-05 —
+    // `content/2026/10/2026-10-05/priya-raghunathan.md`, a bare byline slug with
+    // no `--` and no slug in the name — and the test threw
+    // `Cannot read properties of undefined (reading 'replace')` on
+    // `split('--')[1]`. `pages.yml` runs `node --test` on the publish path, so
+    // that crash blocked the deploy of a perfectly good post and would have
+    // blocked the six-story burst with it. The build was right and the test was
+    // wrong, and a reader saw nothing either way.
+    //
+    // build.mjs prints one line per rendered post, and that list is the build's
+    // own account of what it published. The count check above ties it to the
+    // committed set, so a post cannot quietly stop rendering and pass here.
+    const urls = stdout
+      .split('\n')
+      .map((l) => /^build\.mjs:\s+(\/\S+\/)\s/.exec(l))
+      .filter(Boolean)
+      .map((m) => m[1]);
+    assert.equal(urls.length, markdown.length,
+      'every committed post must render exactly one page');
+    assert.equal(new Set(urls).size, urls.length, 'two posts rendered to the same URL');
+
+    for (const p of urls) {
+      const html = readFileSync(join(out, ...p.split('/').filter(Boolean), 'index.html'), 'utf8');
       const s = sourcesSection(html);
       assert.notEqual(s, '', `${p} rendered no sources section at all`);
       assert.doesNotMatch(s, /<\/span>\s*\./, `${p} rendered a source with no name`);
