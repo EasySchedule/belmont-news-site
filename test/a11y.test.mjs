@@ -130,6 +130,30 @@ function cssRules() {
   return readFileSync(STYLES, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
+// What a screen reader is handed for one link: the visible text, plus the
+// visually hidden words, minus anything an author marked `aria-hidden`. The
+// arrow must not be in here and the announcement must be.
+function accessibleName(inner) {
+  return inner
+    .replace(/<span class="visually-hidden">([\s\S]*?)<\/span>/g, '$1')
+    .replace(/<span[^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/span>/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// The words on the page, with both the hidden announcement and the hidden arrow
+// taken out. This is what a sighted reader sees, and the label the accessible
+// name has to contain.
+function visibleText(inner) {
+  return inner
+    .replace(/<span class="visually-hidden">[\s\S]*?<\/span>/g, '')
+    .replace(/<span[^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/span>/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ------------------------------------------------- the skip link and its target
 
 test('every page carries a skip link', () => {
@@ -226,12 +250,47 @@ test('a new-tab link keeps its visible text at the front of the accessible name'
   for (const { page, html } of pages()) {
     for (const a of anchors(html)) {
       if (!a.newTab) continue;
-      const visible = a.text.replace(/<span class="visually-hidden">[\s\S]*?<\/span>/g, '').trim();
+      const visible = visibleText(a.text);
+      const name = accessibleName(a.text);
       assert.ok(visible, `${page} new-tab link has no visible text of its own`);
-      assert.equal(a.text.trim().startsWith(visible), true,
-        `${page} new-tab link announces itself before its own text: "${a.text.trim()}"`);
+      assert.equal(name.startsWith(visible), true,
+        `${page} new-tab link announces itself before its own text: "${name}"`);
+      assert.match(name, /opens in a new tab/i, `${page} accessible name lost the announcement: "${name}"`);
     }
   }
+});
+
+test('the arrow marker is hidden from assistive technology', () => {
+  // The arrow was once a CSS `content` value, which Chrome with NVDA reads
+  // aloud. The screen-reader user would be told "north east arrow" once per
+  // source, which is the same noise this issue exists to remove. It has to be
+  // an `aria-hidden` element, not generated content and not merely a glyph.
+  let markers = 0;
+  for (const { page, html } of pages()) {
+    assert.doesNotMatch(html, /\.ext::after/, `${page} still draws the arrow with CSS content`);
+    for (const a of anchors(html)) {
+      const mark = /<span class="ext-mark"([^>]*)>/.exec(a.text);
+      if (!mark) continue;
+      markers++;
+      assert.match(mark[1], /aria-hidden="true"/,
+        `${page} ext-mark is not aria-hidden, so the arrow joins the accessible name`);
+    }
+  }
+  assert.ok(markers >= 4, `fixture rendered only ${markers} arrow marker(s)`);
+});
+
+test('the arrow is not part of the accessible name but the words still are', () => {
+  // The other half of the test above: hiding the arrow must not hide the
+  // announcement with it. That would pass the aria-hidden check and break the
+  // reader, which is the worse of the two faults.
+  const post = pages().find((p) => p.page.includes('wall-that-heals-st-clairsville'));
+  assert.ok(post, 'fixture did not render the post page');
+  const a = anchors(post.html).find((x) => x.newTab);
+  assert.ok(a, 'fixture rendered no new-tab link');
+  assert.match(a.text, /aria-hidden="true"[^>]*>\u2197/, 'the arrow is not marked up as a hidden glyph');
+  const name = accessibleName(a.text);
+  assert.doesNotMatch(name, /\u2197/, 'the arrow is still in the accessible name');
+  assert.match(name, /opens in a new tab/i, 'the announcement went with the arrow');
 });
 
 test('a link that stays on this site is not marked as opening a new tab', () => {

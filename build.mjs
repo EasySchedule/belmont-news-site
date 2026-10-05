@@ -103,16 +103,26 @@ const esc = (s) => String(s)
 // that the context is about to change, and on the Wall That Heals story the
 // Sources block is seven of these in a row.
 //
-// The notice goes in a visually hidden span so it reaches assistive technology
-// as text, and the visible marker is a CSS `::after` on `.ext` so sighted
-// readers get it too without the page printing "(opens in a new tab)" seven
-// times. The hidden span comes first and the visible text still leads the
-// accessible name, which keeps WCAG 2.5.3 Label in Name satisfied.
+// Two marks, doing two different jobs.
+//
+// The sentence goes in a visually hidden span, because that is text in the
+// document and it reaches assistive technology reliably. It is appended, never
+// prepended, so the visible text still leads the accessible name and voice
+// control on "click source" keeps working (WCAG 2.5.3).
+//
+// The arrow goes in an `aria-hidden` span rather than a CSS `content` value.
+// It looked equivalent and is not: Chrome with NVDA reads CSS generated
+// content aloud, so an arrow drawn by `content` joins the link's accessible
+// name and the screen-reader user is told "north east arrow" once per source.
+// `aria-hidden` on a real element is the one form that is excluded from the
+// accessibility tree in every combination. The visible text is not the arrow,
+// so hiding the arrow hides nothing a reader needs.
 //
 // Declared here rather than beside the Sources block that uses it most:
 // correction prose renders through inline() above, at module top level, and a
 // const declared further down would be in its temporal dead zone there.
 const NEW_TAB_HINT = '<span class="visually-hidden"> (opens in a new tab)</span>';
+const NEW_TAB_MARK = '<span class="ext-mark" aria-hidden="true">\u2197</span>';
 
 // ------------------------------------------------------------- markdown
 
@@ -140,7 +150,7 @@ function inline(src) {
     // An external link is the one case here that opens a new tab, so it is the
     // one case that has to announce it. Same marker as the Sources block.
     if (/^https?:\/\//.test(safe)) {
-      return `<a class="ext" href="${safe}" rel="noopener noreferrer" target="_blank">${text}${NEW_TAB_HINT}</a>`;
+      return `<a class="ext" href="${safe}" rel="noopener noreferrer" target="_blank">${text}${NEW_TAB_HINT}${NEW_TAB_MARK}</a>`;
     }
     return `<a href="${safe}">${text}</a>`;
   });
@@ -597,7 +607,7 @@ function sourcesBlock(sources) {
     const label = s.type === 'human' ? 'On the record' : 'Document';
     const org = s.organization ? ` — ${s.organization}` : '';
     const date = s.retrieved ? `, retrieved ${s.retrieved}` : '';
-    const link = s.url ? ` <a class="ext" href="${esc(s.url)}" rel="noopener noreferrer" target="_blank">source${NEW_TAB_HINT}</a>` : '';
+    const link = s.url ? ` <a class="ext" href="${esc(s.url)}" rel="noopener noreferrer" target="_blank">source${NEW_TAB_HINT}${NEW_TAB_MARK}</a>` : '';
     return `    <li><span class="src-type">${label}</span> ${esc(s.title || '')}${esc(org)}${esc(date)}.${link}</li>`;
   }).join('\n');
   return `<section class="sources">

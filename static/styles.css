@@ -88,11 +88,12 @@ body {
 }
 
 /* The visible half of a new-tab notice. The spoken half is the
-   `.visually-hidden` span in the markup; this is here for the readers who
-   cannot hear it, and it is generated content so it adds no text node a
-   screen reader has to skip past. */
-.ext::after {
-  content: "\2197"; /* north east arrow */
+   `.visually-hidden` span in the markup.
+   This is a real element carrying `aria-hidden="true"`, not a CSS `content`
+   value. Chrome with NVDA reads generated content aloud, which would put the
+   arrow into the link's accessible name and have the screen-reader user told
+   "north east arrow" once per source. */
+.ext-mark {
   display: inline-block;
   margin-left: 0.15em;
   font-size: 0.85em;
