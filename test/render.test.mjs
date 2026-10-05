@@ -9,9 +9,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, resolve, sep } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -201,6 +201,37 @@ test('a post missing its byline stops the build', () => {
 
 // ------------------------------------------------------------ the real archive
 
+// Where the builder put a post's page: `date`/`slug` out of the front matter,
+// exactly as build.mjs reads them (`url: `${data.date}/${data.slug}/``).
+//
+// This used to split the filename on `--` and take the second half. That threw
+// on the short form `content/<Y>/<M>/<day>/<author-slug>.md`, which the filing
+// rule in the blogs repository allows whenever a writer files one post that day
+// ("It is optional: use the short form when a writer files one post that day"),
+// and `index.mjs --check` accepts it. There was no `--` to split, so
+// `split('--')[1]` was undefined and this line raised
+// `TypeError: Cannot read properties of undefined (reading 'replace')`. Because
+// the renderer tests run inside pages.yml, on the publish path, that took the
+// deploy down with it: a legal filing red the build at 15:25:06Z on the BEL-37
+// publish and no page reached readers.
+//
+// The filename is not the address of a post and never was. build.mjs reads the
+// whole front matter and writes to date/slug, so a post filed under the short
+// form, or under any other name, still lands where the front matter says. Ask
+// the front matter the same way and the two forms stop being different.
+function builtPath(file) {
+  const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(file, 'utf8'));
+  assert.ok(front, `${file} has no front matter block`);
+  const scalar = (key) => {
+    const m = new RegExp(`^${key}:[ \\t]*(.*)$`, 'm').exec(front[1]);
+    assert.ok(m, `${file} has no ${key} in its front matter`);
+    const v = m[1].trim();
+    const q = /^"(.*)"$/.exec(v) || /^'(.*)'$/.exec(v);
+    return q ? q[1] : v;
+  };
+  return `${scalar('date')}/${scalar('slug')}`;
+}
+
 test('every post in the committed content snapshot names its sources', () => {
   const out = mkdtempSync(join(tmpdir(), 'belmont-real-'));
   // The archive is staged into a temp directory and built from the copy. One
@@ -265,9 +296,9 @@ test('every post in the committed content snapshot names its sources', () => {
     assert.match(stdout, new RegExp(`built ${buildable.length} post\\(s\\)`));
     assert.equal(buildable.length, committed, 'no post is dropped from this test without saying so');
     for (const file of buildable) {
-      // content/YYYY/MM/YYYY-MM-DD/author--slug.md renders to YYYY-MM-DD/slug.
-      const parts = file.split(sep);
-      const p = `${parts[parts.length - 2]}/${parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')}`;
+      // The same derivation every other test uses: build.mjs writes to
+      // date/slug out of the front matter, so ask the front matter.
+      const p = builtPath(file);
       const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
       const s = sourcesSection(html);
       assert.notEqual(s, '', `${p} rendered no sources section at all`);
@@ -278,6 +309,63 @@ test('every post in the committed content snapshot names its sources', () => {
   } finally {
     rmSync(out, { recursive: true, force: true });
     rmSync(staged, { recursive: true, force: true });
+  }
+});
+
+test('both filing-rule filename forms publish the page the front matter names', () => {
+  // README.md and CONTRIBUTING.md allow both
+  // `content/<Y>/<M>/<day>/<author-slug>--<slug>.md` and the short
+  // `content/<Y>/<M>/<day>/<author-slug>.md` ("It is optional: use the short
+  // form when a writer files one post that day"), and `index.mjs --check` takes
+  // the short form. Every post in the archive happens to carry a `--`, so
+  // nothing covered the short form: a legal filing red the deploy because the
+  // snapshot test above split the filename on a separator the short form does
+  // not have. Build both here, so the next reporter who uses the short form
+  // gets a page instead of a dead publish.
+  const root = mkdtempSync(join(tmpdir(), 'belmont-bothforms-'));
+  try {
+    const day = join(root, 'content', '2026', '10', '2026-10-02');
+    mkdirSync(day, { recursive: true });
+    // Three sources, the same floor the snapshot test holds the archive to, so
+    // this checks a short-form post publishes a complete page and not only a
+    // directory.
+    const sources = `${SOURCES}
+  - type: document
+    title: "Belmont County EMA, overnight rainfall totals"
+    organization: "Belmont County Emergency Management Agency"
+    retrieved: 2026-10-02
+    url: "https://belmontcountyoh.gov/ema/rainfall"`;
+    const posts = [
+      { file: 'nathan-beausoleil--the-long-form-still-publishes.md', slug: 'the-long-form-still-publishes' },
+      { file: 'priya-raghunathan.md', slug: 'the-short-form-publishes-too' },
+    ];
+    for (const { file, slug } of posts) {
+      const front = FRONT.replace(/^slug: .*$/m, `slug: ${slug}`);
+      writeFileSync(join(day, file), `---\n${front}\n${sources}\n---\n\n## The post\n\nRain tonight, then a dry weekend.\n`);
+    }
+
+    const stdout = execFileSync('node', [BUILD, '--content', join(root, 'content'), '--out', join(root, 'dist'), '--site-url', 'https://example.test'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    assert.match(stdout, /built 2 post\(s\)/);
+
+    for (const { file, slug } of posts) {
+      // Go through the same derivation the snapshot test uses, so this covers
+      // the line that threw rather than only the builder.
+      assert.equal(builtPath(join(day, file)), `2026-10-02/${slug}`);
+      const s = sourcesSection(readFileSync(join(root, 'dist', '2026-10-02', slug, 'index.html'), 'utf8'));
+      assert.notEqual(s, '', `${slug} rendered no sources section at all`);
+      assert.doesNotMatch(s, /<\/span>\s*\./, `${slug} rendered a source with no name`);
+      assert.ok((s.match(/<li>/g) || []).length >= 3, `${slug} rendered fewer than three sources`);
+    }
+
+    // The filename is not the address of a post. A short-form post publishes
+    // where its front matter says, not where it happens to sit on disk.
+    assert.ok(!existsSync(join(root, 'dist', '2026-10-02', 'priya-raghunathan')), 'the filename leaked into the URL');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
