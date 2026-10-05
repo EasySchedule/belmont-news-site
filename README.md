@@ -408,12 +408,15 @@ front page and still report green every fifteen minutes.
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
 | `scripts/check-listing-stale.mjs` | Answers "was the front page built for an earlier newsroom day?" and exits 0/1/2. |
+| `scripts/check-hosts.mjs` | Answers "does each host in the record serve our content, not merely answer 200?" and exits 0/1/2. |
+| `hosts.json` | The deploy record's host table, machine-readable. The check reads this, not the README. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
 | `test/expiry.test.mjs` | The listing window, and the four surfaces it does and does not touch. |
 | `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
 | `test/listing-stale.test.mjs` | The listing-staleness check, and its refusal cases. |
+| `test/host-content.test.mjs` | The host-content check: a 200 serving the wrong bytes must fail, and stay distinct from unreachable. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
 | `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over. |
@@ -441,9 +444,11 @@ Check `/build-info.json` on the deployed site to see whether analytics is on.
 
 **The live host is GitHub Pages**, at
 <https://easyschedule.github.io/belmont-news-site>. That is the URL the
-newsroom verifies. Netlify is configured in `netlify.toml` and builds the same
-`dist/` from the same command, but it is not deployed and its host returns 404,
-so nothing in the publish path depends on it. See "Hosting" below.
+newsroom verifies, and the only one the newsroom publishes. Netlify is also
+live at `https://belmont-news.netlify.app` and rebuilds on every push to `main`,
+so a second copy of this site is being served from there right now. It cannot be
+current unless its build syncs the store, which it now does, but it is still not
+the publish path and not the URL to give a reader. See "Hosting" below.
 
 Push to `main` and `pages.yml` publishes. That workflow is the only thing in
 this repository that builds or deploys; every other route into publishing ends
@@ -471,6 +476,23 @@ git ls-remote https://github.com/EasySchedule/belmont-news-blogs.git refs/heads/
 ```
 
 Those two agree when the site is current.
+
+**Fifteen minutes is the schedule, not the observed delay.** GitHub queues scheduled
+workflows and this repository's `*/15` cron has been running hours late: six runs on
+2026-10-04 and three on 2026-10-05, against the 96 a day the cron asks for. The
+schedule also used to fail outright at its last step -- the dispatch job has no
+checkout, so `gh workflow run pages.yml --ref main` had no repository to resolve
+and died on `fatal: not a git repository`, twelve runs in a row from 2026-10-03.
+`--repo "$GITHUB_REPOSITORY"` fixed that in #14.
+
+Neither failure is visible from the newsroom's side: a store merge can sit
+unpublished for hours with the site answering 200 the whole time. So when an
+edition has to be up now, dispatch it rather than waiting:
+
+```
+gh workflow run publish-on-blogs-update.yml --ref main   # decides, then dispatches pages.yml
+gh workflow run pages.yml --ref main                     # publishes unconditionally
+```
 
 The same check runs by hand, which is what to use when a merge has just landed
 and the wait is too long:
@@ -515,16 +537,77 @@ node scripts/check-listing-stale.mjs    # 0 current, 1 stale, 2 could not tell
 
 ### Hosting
 
-Two hosts are configured and only one is live.
+Two hosts are configured. **One is the publish path. The other is live and is not it.**
 
 | Host | State | URL |
 |---|---|---|
-| GitHub Pages | **Live. The verified publish path.** | `https://easyschedule.github.io/belmont-news-site` |
-| Netlify | Configured in `netlify.toml`, not deployed, returns 404 | `https://belmont-news.netlify.app` |
+| GitHub Pages | **Live. The only verified publish path. Give a reader this one.** | `https://easyschedule.github.io/belmont-news-site` |
+| Netlify | Live, rebuilds on every push, and was behind by construction. Not the publish path. | `https://belmont-news.netlify.app` |
 
-Both run `npm run build` and publish `dist/`, so they render identical HTML.
-Until Netlify is deployed and its URL is verified, GitHub Pages is production
-and `pages.yml` is the publish path. Do not describe a Netlify deploy as done.
+Checked 2026-10-05, from the two hosts' own `/build-info.json`:
+
+| | Pages | Netlify |
+|---|---|---|
+| Store commit rendered | `78cd169e`, current | `bc766e21`, the 2026-10-02 snapshot |
+| Posts | 10 | 4 |
+| Listed on the front page | 5 | 2 |
+| `listing.fallback` | `false` | `true` |
+| Content synced at | build time, from the store | 2026-10-02, from the committed `content/` |
+
+The Netlify host is bound to this repository: it serves the `[[headers]]` and the
+`/rss` redirect from `netlify.toml`, which Pages serves neither of. And it is not
+a stale deploy nobody has touched -- its `build-info.json` is stamped within a
+second of the Pages deploy on the same push.
+
+**Why it was behind, and what stops it.** `netlify.toml` built `npm test && npm run build`, which
+renders the `content/` directory **as committed in this repository**. `pages.yml` syncs the
+markdown store on the GitHub runner and never commits the synced tree back, so that directory was
+frozen at the 2026-10-02 sync however many blogs were merged since. The build command now syncs
+the store first, the same way `pages.yml` does, so a Netlify build cannot render a stale snapshot
+whatever happens to be committed. Netlify still sets no `SOURCE_DATE_EPOCH`, so its feed
+timestamps follow the wall clock and its bytes will differ from Pages'; that is one more reason it
+is not the host to publish.
+
+**Until the Netlify site itself is paused or removed, treat it as a second, unwatched copy.** On
+2026-10-05 it 404ed every 2026-10-05 edition URL that Pages served. Its own `rel=canonical`
+points at Pages, which is the only thing telling a reader and a crawler which copy is the
+newsroom's. Do not describe a Netlify deploy as done, and do not give its URL to a reader.
+
+Neither host can be settled from this repository alone: pausing or removing the Netlify site needs
+a Netlify credential. Until one exists, the repo-side fix above is the whole of what is available.
 
 A failing gate stops both, because the gate runs before the upload step.
+
+### Does each host actually serve us? (`scripts/check-hosts.mjs`)
+
+**A status code is not evidence that a host is alive.** `belmont-county-news-b68j.bolt.host`
+answers **HTTP 200** with an 8478-byte body that is Bolt's "Website Not Found" page. A checker
+that asks only "did it answer?" reports a dead host as healthy, which is the most likely mechanism
+behind this section having been wrong: the record asserted hosts were fine because they answered,
+and nothing ever checked what they served. That mistake was reported outward twice on 2026-10-05 —
+once as a site-wide outage that was really one dead host, once as the site being down when it was
+published on a second host.
+
+`hosts.json` is the table above in a form a program can check, and `scripts/check-hosts.mjs` reads
+it. Every host is asserted on content, never on a status code:
+
+| Host | Asserted on |
+|---|---|
+| `github-pages` | `/build-info.json` parses, `contentHead` is 40 hex, and it equals the store's `main` |
+| `netlify` | the same marker, but staleness is reported rather than failed — it is not the publish path |
+| `bolt-app` | HTML containing `<title>Belmont County News WebApp</title>`, and **not** "Website Not Found" |
+| `bolt-county-dead` | asserted **dead**: if it ever serves our markers again, the check fails |
+
+```
+node scripts/check-hosts.mjs         # 0 all hosts served us, 1 a host served the wrong thing, 2 could not tell
+```
+
+Exit 1 and exit 2 are separate on purpose. A host answering 200 with the wrong body is a durable
+fact about that host; an unreachable host is a fact about this run. Merging them is how a network
+blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
+failure line names the host and the marker, so the log says which thing broke.
+
+All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
+or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`
+covers it, including a test that fails if the record ever grows a `expectedStatus`-style field.
 
