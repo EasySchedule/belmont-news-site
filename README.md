@@ -215,6 +215,84 @@ value fails at the pull request that introduced it as well as at deploy time.
 The field is declared in that repository's `schema.json`, which is what stops
 `additionalProperties: false` from rejecting a post that uses it.
 
+### Declared expiry
+
+The window is a question about the calendar: is this post still inside the last two
+news days? It cannot answer whether the story is still *true*. Those come apart
+constantly on a newsroom that covers events. The Wall That Heals exhibit was filed
+2026-10-03, shut Sunday 2026-10-04 at 14:00, and on Monday the 5th it was inside
+its own two-day window, still on the front page, still in the feed, still telling a
+reader it "closes tonight".
+
+So a post may say so itself:
+
+```yaml
+expired: 2026-10-04     # the story stopped being true on that newsroom day
+expired: true           # the story stopped being true, no single day to name
+```
+
+A day is preferred over a bare `true`, because "this closed at 14:00 on the 4th" is
+something a reader can be told and "this is old" is not. **Before** that day the
+post behaves exactly as before, so a story can be marked on the morning it publishes
+and go stale on its own — the moment a story decays, nobody is watching.
+
+Either value is refused if it is misspelled, for the same reason `expires` is: a
+flag that is silently ignored leaves the page reading as live and the source reading
+as expired, and nobody finds out until a reader is told an exhibit closes tonight
+three days after it shut. `expired` before the post's own `date` is refused as a
+typo.
+
+This is a second, independent reason to leave the listing and the feed — not a
+replacement for the window. Either one is enough. Note that `expired` is a statement
+about the story and the window is a statement about the calendar, so `build-info.json`
+now reports which one removed each post, as `reason`.
+
+### The notice a reader gets
+
+A post that is not current keeps its page, its sources, and its sitemap entry.
+Nothing is withdrawn: the permalink in every already-delivered feed `guid` has to
+keep resolving, and a reader who followed a link has to be told the difference
+between what the story said and what is true.
+
+Three surfaces say so, in three lengths: a dated notice on the post's own page, a
+dated flag on a front-page card, and an `archive` category on the feed item. The
+notice is more than a label. It names which day the page stopped being current,
+says whether that is a calendar fact or a truth claim, tells the reader to check
+the named sources before acting, and states that nothing on the page is a standing
+claim about today. That last sentence is the construction the weather roundup in the
+archive already uses correctly — "an empty alert response is a statement about the
+moment of retrieval, not a standing guarantee" — applied to dates and hours.
+
+### The body's shape
+
+The gate above checks front matter — title, date, byline, slug, sources — and never
+looked at the body. That is how a page shipped that rendered the Paperclip document
+API response instead of the story: HTTP 200, a valid `h1`, a valid byline, and the
+article trapped inside as an escaped string under a `body` key. Nothing signalled
+failure, and the gate that stops an unsourced or badly-bylined post said nothing,
+because it only ever read the front matter.
+
+The diagnosis is worth recording because it is not the obvious one: **nothing in this
+build reads a wrong field.** `parseFrontMatter` returns everything after the closing
+`---` and `postPage` renders it. There is no field selection in the pipeline, so
+there was no field to get wrong — the file itself contained the whole API response
+where markdown belonged.
+
+So the guard is on the input: a body that is a serialized data document **fails the
+build**, naming the file and telling the author to write the markdown that is the
+value of its `body` key. This is a refusal, not a redaction, which is the stronger
+answer — a `.body`-only fix would have left `companyId`, `issueId`,
+`latestRevisionId`, `createdByAgentId`, `lockedByAgentId` and `sourceTrust` in the
+served bytes, and governance fields have no business being public under any
+rendering rule.
+
+The test is that the **entire** body parses as one JSON object or array, which is why
+it cannot fire on a story that opens with a brace, on a story that opens with a
+bracket, or on a story quoting JSON inside a fenced code block. Bare JSON scalars are
+deliberately not refused: `"a pull quote"` is an ordinary paragraph opening, and a
+gate that refuses pull quotes gets deleted.
+
+
 ### The listing rolls on its own
 
 A listing that ages out on a calendar boundary needs a build on that boundary. The
@@ -248,6 +326,28 @@ warns on stderr, and `build-info.json` records `listing.fallback: true`. It does
 fail the deploy: refusing to publish because a listing would be empty is worse than
 showing a slightly older story, and the gate already refuses to publish a site with
 no posts at all. Every post page and every sitemap entry is unaffected either way.
+
+What was missing is that the fallback published those posts with **no signal at
+all**, under a navigation link reading *Latest*. They are, by construction, all out
+of window, so they were the least-marked pages on the site — and the one a reader
+lands on first was the one serving false present tense with nothing above it. Three
+separate audits found that instance independently, and none of them could have been
+fixed by marking the three posts that were already off the listing.
+
+So the fallback now carries the same dated notice the expired path does: every card
+is flagged with its publication day, and the page says once, at the top, that
+nothing filed fell inside the window and that what follows is archive. The fallback
+may overrule the window, because an old post that may still be true is a better
+front page than a blank one *provided the page says so*. It may **not** overrule a
+declared `expired`: resurrecting a post the desk has said is no longer true, because
+it is merely recent, would publish the defect by the very mechanism built to remove
+it. If every post has expired, the front page says it is empty and the archive still
+publishes in full.
+
+`windowDays: 2` is a policy value, not a rendering bug. On a newsroom that publishes
+hourly it makes the front page's *Latest* at least two days stale by design. It is
+already a per-build flag (`--listing-days`), so it is the board's call rather than a
+default nobody has looked at.
 
 ## The gate
 
