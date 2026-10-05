@@ -117,7 +117,7 @@ edition the evening before. A stamp read off the calendar date alone therefore
 lands up to a day ahead of the reader, and feed readers treat a future item as
 unreadable. Every `pubDate` is capped at the instant this build shipped, which
 is also the honest answer to "when did this reach the reader". `build-info.json`
-marks the items that were capped, in `feed[].clampedToBuildEpoch`.
+marks the items that were capped, in `feed.entries[].clampedToBuildEpoch`.
 
 **2. No offset is written down.** `-04:00` is correct until 2026-11-01 and wrong
 for the rest of the year when the newsroom moves to EST. `scripts/dates.mjs`
@@ -141,11 +141,39 @@ are the floor for the bare `YYYY-MM-DD` that the blogs schema uses today.
 The feed is sorted newest first by publication instant, so a post published in
 its own edition slot ranks above one that shipped later on the same day.
 
-`lastBuildDate` uses the same clock, which makes the feed reproducible from Git:
-CI sets `SOURCE_DATE_EPOCH` from the commit being deployed
-(`git log -1 --format=%ct`) and two builds of the same commit emit the same
-bytes. `npm run build` locally falls back to the wall clock, and
-`--build-epoch <unix-seconds>` sets it explicitly.
+`lastBuildDate` is the newest item's publication instant, capped at the build like
+every other timestamp. RSS 2.0 defines it as the last time the channel's *content*
+changed, so a rebuild that changed nothing reports nothing new. It used to be the
+build instant, which on a quiet newsroom day told a reader's reader "rebuilt just
+now" over items days old — the two states a reader most needs to tell apart.
+
+`ttl` is 60 minutes. RSS 2.0 defines it as how long the channel may be cached.
+It was absent, so each reader picked its own interval. Both values are reported
+in `build-info.json` under `feed`, so the numbers are auditable from the served
+bytes rather than read out of the source.
+
+The whole clock is reproducible from Git: CI sets `SOURCE_DATE_EPOCH` from the
+commit being deployed (`git log -1 --format=%ct`) and two builds of the same
+commit emit the same bytes. `npm run build` locally falls back to the wall clock,
+and `--build-epoch <unix-seconds>` sets it explicitly.
+
+## Feed bylines
+
+RSS 2.0 defines `<author>` as an **email address**. A display name there is
+off-spec and readers that honour the spec drop it, so the byline lived in one
+field on the surface most likely to be read by software.
+
+- The name ships in **`<dc:creator>`**, with the Dublin Core namespace declared
+  on `<rss>`. This is the field feed readers actually display.
+- `<author>` carries an address **only when the post supplies one**, as an
+  optional `byline_email` front-matter field. A malformed address fails the
+  build, the same as an unsourced post.
+
+No address is invented. The byline roster in the markdown store carries none, so
+every item currently ships the name and no `<author>`. A made-up mailbox in a
+newsroom feed is a contact point that bounces, and a bounced contact point is
+worse than no contact point. `build-info.json` reports `feed.authorsWithAddress`
+so the gap is visible rather than assumed.
 
 ## The rolling listing
 

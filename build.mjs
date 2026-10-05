@@ -313,6 +313,42 @@ function fail(msg) {
   process.exit(1);
 }
 
+// ------------------------------------------------- byline contact address
+//
+// RSS 2.0 defines <author> as the email address of the item's author, not as the
+// person's name. The feed used to print the display name there, which is
+// off-spec, and readers that honour the spec drop it. That left the byline
+// living in exactly one field on exactly the surface most likely to be read by
+// software, which is not a byline. BEL-138.
+//
+// The name now travels in <dc:creator>, which is what feed readers actually
+// display, and <author> carries an address. No address is invented: the roster
+// in the markdown store carries none, so a post that does not supply one emits
+// no <author> at all rather than a bare name in a field whose whole meaning is
+// "this is an address". A made-up mailbox in a newsroom feed is a contact point
+// that bounces, and a bounced contact point is worse than no contact point.
+//
+// So the address is opt-in, per post, as `byline_email`, and it is checked here.
+// An address that is not an address stops the build for the same reason an
+// unsourced post does: it would reach a reader's reader as a broken byline, and
+// the only place to catch that is before the publish.
+const EMAIL = /^[^\s@,;:<>()[\]\\]+@[^\s@,;:<>()[\]\\]+\.[^\s@,;:<>()[\]\\]+$/;
+
+function bylineEmail(fm) {
+  const raw = fm?.byline_email;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  return String(raw).trim();
+}
+
+function bylineEmailError(fm, file) {
+  const value = bylineEmail(fm);
+  if (value === null) return null;
+  if (EMAIL.test(value)) return null;
+  return `${file}: byline_email must be an email address, got ${JSON.stringify(value)}. `
+    + 'The feed only puts a real address in <author>; a display name there is off-spec and readers drop it. '
+    + 'Leave the field out if this byline has no published address: the name still ships in <dc:creator>.';
+}
+
 // ------------------------------------------------------------ discovery
 
 function walk(dir, out = []) {
@@ -354,6 +390,8 @@ const posts = files.map((f) => {
   // which is the exact defect this rule was added to remove.
   const badExpiry = expiryError(data, rel);
   if (badExpiry) fail(badExpiry);
+  const badEmail = bylineEmailError(data, rel);
+  if (badEmail) fail(badEmail);
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 
@@ -744,25 +782,70 @@ const feedItems = listing
     || (b.post.fm.date || '').localeCompare(a.post.fm.date || '')
     || a.post.fm.slug.localeCompare(b.post.fm.slug));
 
+// How long a reader may cache this feed, in minutes.
+//
+// RSS 2.0 defines <ttl> as the number of minutes the channel can be cached
+// before it is checked again. It was absent, so every reader picks its own
+// interval, and the ones that pick a long one sit on a two-day-old feed for a
+// day. The newsroom publishes at 06:00 and 20:00 America/New_York and
+// publish-on-blogs-update.yml probes every 15 minutes, so 60 is comfortably
+// inside the gap between a story being filed and a reader seeing it, and it is
+// reported in build-info.json so the number is auditable rather than buried.
+const FEED_TTL_MINUTES = 60;
+
+// The channel's own clock.
+//
+// <lastBuildDate> is documented as "the last time the content of the channel
+// changed". It was the build instant, so on a quiet newsroom day the feed said it
+// had just been rebuilt while every item in it was days old: a reader's reader
+// saw a fresh timestamp and a stale front page and had no way to tell those apart.
+// On 2026-10-05 it read Mon, 05 Oct 2026 13:24:00 GMT over two items published
+// Sat, 03 Oct 2026 04:00:00 GMT. BEL-138.
+//
+// The newest item's publication instant is the moment the channel last gained
+// content, which is what the field means. Clamped to the build instant for the
+// same reason every pubDate is: nothing in the feed is ever dated later than the
+// build that emitted it, and an empty channel falls back to the build instant
+// because a channel with no items has no newer content to report. A rebuild that
+// changes nothing therefore reports nothing new, which is the point.
+const newestItemAt = feedItems.reduce((newest, { publishedAt }) => Math.max(newest, publishedAt), 0);
+const lastBuildAt = Math.min(newestItemAt || SHIPPED_AT, SHIPPED_AT);
+
 function feed() {
-  const items = feedItems.map(({ post: p, publishedAt }) => `  <item>
-    <title>${esc(p.fm.title)}</title>
-    <link>${esc(abs(p.url))}</link>
-    <guid isPermaLink="true">${esc(abs(p.url))}</guid>
-    <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>
-    <author>${esc(p.fm.byline)}</author>
-    <category>${esc(p.fm.category || 'news')}</category>
-    <description>${esc(p.fm.dek || '')}</description>
-  </item>`).join('\n');
+  const items = feedItems.map(({ post: p, publishedAt }) => {
+    // The address goes in <author> only when the post supplies one, and the name
+    // goes in <dc:creator> always. See bylineEmail() for why no address is
+    // invented: an absent <author> costs a reader nothing, an off-spec one costs
+    // them the byline.
+    //
+    // The element is dropped rather than left as an empty line, so the served
+    // bytes do not carry a hole where a byline used to be for every item until
+    // the roster grows an address.
+    const address = bylineEmail(p.fm);
+    const lines = [
+      `  <item>`,
+      `    <title>${esc(p.fm.title)}</title>`,
+      `    <link>${esc(abs(p.url))}</link>`,
+      `    <guid isPermaLink="true">${esc(abs(p.url))}</guid>`,
+      `    <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>`,
+      address ? `    <author>${esc(address)}</author>` : null,
+      `    <dc:creator>${esc(p.fm.byline)}</dc:creator>`,
+      `    <category>${esc(p.fm.category || 'news')}</category>`,
+      `    <description>${esc(p.fm.dek || '')}</description>`,
+      `  </item>`,
+    ];
+    return lines.filter((l) => l !== null).join('\n');
+  }).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
 <channel>
   <title>Belmont News</title>
   <link>${esc(opts.siteUrl)}/</link>
   <atom:link href="${esc(abs('feed.xml'))}" rel="self" type="application/rss+xml" />
   <description>Independent local news for Belmont County, Ohio.</description>
   <language>en-us</language>
-  <lastBuildDate>${new Date(SHIPPED_AT).toUTCString()}</lastBuildDate>
+  <lastBuildDate>${new Date(lastBuildAt).toUTCString()}</lastBuildDate>
+  <ttl>${FEED_TTL_MINUTES}</ttl>
 ${items}
 </channel>
 </rss>
@@ -789,12 +872,45 @@ ${items}
 // If the desk later rules that expired pages are withdrawn rather than aged out,
 // that is a new issue and it needs a mechanism decided there: this host's
 // redirect story, and whether a withdrawn URL is served a 404 body or moved.
+//
+// `lastmod` for a corrections page is the latest date that page actually prints,
+// which is not what the code used to read out of the log.
+//
+// It was `log.entries[0]`, and the log is append-only, so entries[0] is the
+// OLDEST entry rather than the newest. On 2026-10-03 three corrections were
+// appended under the three that were already there and the value stayed pinned
+// to 2026-10-02, so a crawler reading the sitemap was told the corrections page
+// had not changed since the day before the two superseding corrections landed on
+// it. A corrections log that a search engine cannot be told to re-read is not
+// doing its job, and the entries it was hiding are the ones explicitly marked
+// superseded. BEL-137.
+//
+// Both dates are counted because both are printed: a page can change because a
+// correction was appended, and because the entry names a later-dated post. ISO
+// dates compare correctly as strings, so the max is the max.
+//
+// Returns '' when there is nothing to say. `lastmod` is optional in the sitemap
+// protocol, and an invented date is worse than an absent one: the old fallback
+// was the month, `2026-10`, which is a partial date many parsers reject or
+// coerce. A log with no corrections has no modification date to report, so the
+// element is omitted instead of guessed at.
+function lastPrintedDate(dates) {
+  return dates.reduce((newest, d) => (d && d > newest ? d : newest), '');
+}
+
+function logLastmod(log) {
+  return lastPrintedDate(log.entries.flatMap((e) => [e.correctionDate, e.postDate]));
+}
+
 function sitemap() {
   const urls = [
     { loc: abs(''), lastmod: '' },
     ...posts.map((p) => ({ loc: abs(p.url), lastmod: p.fm.date })),
-    { loc: abs(correctionsIndexUrl), lastmod: corrections.logs[0]?.month || '' },
-    ...corrections.logs.map((log) => ({ loc: abs(correctionsMonthUrl(log.month)), lastmod: log.entries[0]?.correctionDate || log.month })),
+    // The index is as current as the newest entry on any month page beneath it,
+    // so it takes the newest date across every log rather than the newest log's
+    // month. Same reason as above: a partial date here told a crawler nothing.
+    { loc: abs(correctionsIndexUrl), lastmod: lastPrintedDate(corrections.logs.map(logLastmod)) },
+    ...corrections.logs.map((log) => ({ loc: abs(correctionsMonthUrl(log.month)), lastmod: logLastmod(log) })),
   ].map((u) => `  <url>
     <loc>${esc(u.loc)}</loc>
     ${u.lastmod ? `<lastmod>${esc(u.lastmod)}</lastmod>` : ''}
@@ -904,13 +1020,30 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
     entries: log.entries.length,
     title: log.title,
   })),
-  feed: feedItems.map(({ post: p, publishedAt }) => ({
-    url: `/${p.url}`,
-    date: p.fm.date,
-    edition: p.fm.edition || null,
-    pubDate: new Date(publishedAt).toUTCString(),
-    clampedToBuildEpoch: publishedAt === SHIPPED_AT,
-  })),
+  feed: {
+    // The channel clock, reported rather than buried. `lastBuildDate` is the
+    // newest item's instant, not the build instant, so a rebuild that changed
+    // nothing reports nothing new; `ttl` is the caching hint the feed gives a
+    // reader's reader. Both are the questions an auditor asks of a feed that
+    // looks stale, and both used to be unanswerable from the served bytes.
+    lastBuildDate: new Date(lastBuildAt).toUTCString(),
+    ttlMinutes: FEED_TTL_MINUTES,
+    items: feedItems.length,
+    authorsWithAddress: feedItems.filter(({ post }) => bylineEmail(post.fm)).length,
+    entries: feedItems.map(({ post: p, publishedAt }) => ({
+      url: `/${p.url}`,
+      date: p.fm.date,
+      edition: p.fm.edition || null,
+      // The byline as a reader gets it: the name in <dc:creator>, and an
+      // <author> only when the post supplies a real address. `author: null`
+      // means the feed carries the name and no address, which is the correct
+      // state for a byline that has no published mailbox.
+      byline: p.fm.byline,
+      author: bylineEmail(p.fm),
+      pubDate: new Date(publishedAt).toUTCString(),
+      clampedToBuildEpoch: publishedAt === SHIPPED_AT,
+    })),
+  },
 }, null, 2)}\n`);
 copyFileSync(join(HERE, 'static', 'styles.css'), join(outDir, 'styles.css'));
 try {
