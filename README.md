@@ -353,8 +353,7 @@ by dispatching it.
 
 The markdown store is a different repository, so a merge to
 `belmont-news-blogs` `main` does not push this one and does not fire `pages.yml`
-on its own. That gap is closed by `publish-on-blogs-update.yml`, which runs
-every 15 minutes:
+on its own. That gap is closed by `publish-on-blogs-update.yml`:
 
 1. `build.mjs` stamps the store commit it rendered into `/build-info.json`, so
    the published site can say what it is built from.
@@ -362,8 +361,7 @@ every 15 minutes:
 3. If they differ, it dispatches `pages.yml`, which rebuilds and redeploys. If
    they match, it does nothing and no deploy is spent.
 
-So a correct merge to the store publishes within about fifteen minutes without
-anyone remembering to. Check it at any time:
+Check it at any time:
 
 ```
 curl -s https://easyschedule.github.io/belmont-news-site/build-info.json | grep contentHead
@@ -371,6 +369,36 @@ git ls-remote https://github.com/EasySchedule/belmont-news-blogs.git refs/heads/
 ```
 
 Those two agree when the site is current.
+
+**How long that takes, measured, not declared.** Two triggers answer this
+question and they are not equally good.
+
+| Trigger | Fires | Measured latency |
+|---|---|---|
+| `repository_dispatch` | when the store moves | seconds, plus one build |
+| `schedule` (`*/15`) | on a timer | 1h to 7h, median 4h17m |
+
+The `*/15` cron declares a fifteen-minute window and does not deliver it. Over
+54 hours it fired 13 times against 217 windows, a firing rate of 6%. The worst
+gap was 6h59m. This was measured from the Actions API under BEL-76.
+
+It is not queueing on this repository's own runners: on every observed run
+`run_started_at` equals `created_at`, so no run waited for a runner. GitHub's
+cron dispatcher emitted the event late or dropped the window. No edit to a
+workflow file can change that, so do not read `*/15` as a promise. The schedule
+stays because it is anonymous and needs no credential, and because it means an
+edition is never more than one missed window behind. It is not what makes a
+06:00 edition visible on time.
+
+So a blogs merge publishes in seconds once the durable trigger is live, and up
+to about seven hours while it is dormant.
+
+`repository_dispatch` is wired into the workflow and **dormant**. Nothing sends
+the event yet: the sender belongs in `belmont-news-blogs` and needs a credential
+there that can write to this repository, which is a credential decision for Taz
+Loring rather than a build change. Until it exists, the workflow behaves exactly
+as it does today. The deploy order, which cannot be reordered, is in the header
+of `.github/workflows/publish-on-blogs-update.yml`.
 
 The same check runs by hand, which is what to use when a merge has just landed
 and the wait is too long:
@@ -389,8 +417,8 @@ mechanism exists to prevent.
 ### The listing rolls without a commit
 
 The front page is a rolling listing, so it also needs a publish on days when
-nobody commits anything. `publish-on-blogs-update.yml` runs two checks on its
-fifteen-minute schedule, because the site can be behind for two unrelated reasons:
+nobody commits anything. `publish-on-blogs-update.yml` runs two checks on each
+trigger, because the site can be behind for two unrelated reasons:
 
 1. `check-blogs-ahead.mjs` — the markdown store moved. Compares the store's `main`
    against the `contentHead` the live site reports.

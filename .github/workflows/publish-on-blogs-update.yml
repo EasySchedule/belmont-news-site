@@ -8,32 +8,60 @@
 #
 # How it works. build.mjs stamps the store commit it rendered into
 # /build-info.json, so "is the published site current?" is a lookup rather than
-# an inference. This workflow asks that question on a schedule and dispatches
-# pages.yml when the answer is no. pages.yml stays the single publish path: this
-# file never builds and never deploys, it only decides whether to ask
-# pages.yml to run, and the renderer tests and the sourcing gate still run
-# inside pages.yml exactly as before.
+# an inference. This workflow asks that question whenever the store moves, and
+# again on a schedule as a backstop, and dispatches pages.yml when the answer is
+# no. pages.yml stays the single publish path: this file never builds and never
+# deploys, it only decides whether to ask pages.yml to run, and the renderer
+# tests and the sourcing gate still run inside pages.yml exactly as before.
 #
-# Why a schedule and not repository_dispatch. BEL-18 section 7.3 asks for a
-# cross-repository trigger, and this is the same idea, but the two mechanisms
-# that implement it need something this newsroom does not have:
+# It answers one question on two triggers. The first version answered it on a
+# schedule alone, and that is the defect BEL-76 measured: the schedule is not
+# runnable at the interval it declares.
 #
-#   repository_dispatch  needs a credential in belmont-news-blogs that can
-#                        write to belmont-news-site. There are no secrets in
-#                        either repository, and minting a cross-repo token is a
-#                        credential decision, not a build change.
-#   workflow_run         needs the same cross-repo read, for the same reason.
+# The schedule is a backstop, not the publish path. BEL-76 measured it: over
+# 54 hours the */15 cron below fired 13 times against 217 windows, a firing rate
+# of 6%. Median gap between scheduled runs 4h17m, worst 6h59m. A story merged to
+# the store at 06:05 could sit unbuilt until the following scheduled run.
 #
-# Both also only work if the blogs side is changed and re-deployed in step with
-# this side, so the trigger would live in two repositories and break whenever
-# one moved. This needs no token at all: the store is public and the deployed
-# site is public, so both reads are anonymous. That is also what lets it run on
-# a schedule in a repository that holds no credentials.
+# That number is not a statement about this workflow. On every one of those runs
+# run_started_at equals created_at, so nothing waited for a runner and nothing
+# was queued. GitHub's cron dispatcher emitted the event late, or dropped the
+# window, upstream of anything this file controls. Nothing edited here can make
+# a cron fire on time, so the schedule is kept only as the credential-free
+# safety net it already is, and the real trigger is the event below.
 #
-# What it costs. A scheduled run every 15 minutes, and a publish only when the
-# store has actually moved, so the common run is two cheap anonymous reads and
-# no deploy. GitHub disables scheduled workflows on a repository with no
-# activity for 60 days; this repository publishes twice a day.
+# Two triggers, one gate. Both paths run the same two probes and reach the same
+# single dispatch job, so the probe that cannot answer still goes red on either
+# path, and there is still exactly one publish path.
+#
+#   repository_dispatch  the durable answer, and the one BEL-18 section 7.3
+#                        asks for. It fires when the store moves, not on a
+#                        timer, so the publish latency is the event plus one
+#                        build, measured in seconds rather than hours. It is
+#                        wired below but DORMANT: the sender lives in
+#                        belmont-news-blogs and needs a credential there that
+#                        can write to this repository, which is a credential
+#                        decision, not a build change. Until that token is
+#                        minted and installed, nothing sends this event and
+#                        the workflow behaves exactly as before.
+#
+#   schedule             anonymous, needs no token, and unreliable by a factor
+#                        of 28. Kept because dropping it would leave the
+#                        newsroom with no automatic path at all.
+#
+# Deploy order for turning the dormant path on, which cannot be reordered:
+#
+#   1. merge this file to main. repository_dispatch only triggers a workflow
+#      that is already on the default branch, so a blogs-side sender merged
+#      first would deliver an event nobody is listening for.
+#   2. mint the cross-repository credential and install it as a secret in
+#      belmont-news-blogs. Never in this repository.
+#   3. merge the sender workflow in belmont-news-blogs.
+#   4. verify with a real event, not by assumption.
+#
+# Neither repository holds a secret today, which is why the schedule still
+# works: the store is public and the deployed site is public, so both reads are
+# anonymous.
 #
 # When the store cannot be reached, or the live site will not say what it
 # rendered, check-blogs-ahead.mjs exits 2 and this workflow goes red. That is
@@ -44,11 +72,18 @@ name: Publish on blogs update
 
 on:
   schedule:
-    # Every 15 minutes. The newsroom publishes 06:00 and 20:00, so the gap
-    # between an edition being merged and a reader seeing it is minutes, not
-    # hours. GitHub queues scheduled runs and they can be delayed under load;
-    # a missed window is caught by the next one.
+    # Declared every 15 minutes. Measured, it fires roughly every 1 to 7 hours,
+    # median 4h17m, over 13 runs in 54 hours (BEL-76). The newsroom publishes
+    # 06:00 and 20:00, so this is NOT the path that makes an edition visible on
+    # time. It is here so that an edition is never more than one missed window
+    # behind when the durable trigger is dormant. Do not read "*/15" as a
+    # fifteen-minute promise anywhere in this repository; README.md states the
+    # measured latency instead.
     - cron: '*/15 * * * *'
+  # Durable, event-driven, and dormant until a cross-repository credential
+  # exists. See the deploy order in the header above before enabling the sender.
+  repository_dispatch:
+    types: [blogs-updated]
   workflow_dispatch:
 
 permissions:
