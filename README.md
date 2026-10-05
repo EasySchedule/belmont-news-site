@@ -87,6 +87,49 @@ A correction is linked to its post only when that post is in the same build. A
 correction can outlive the post it refers to, and a dead link in a corrections
 log is worse than plain text.
 
+### The log has to reach the post it names
+
+That rule above is one direction, and until BEL-324 nothing checked the other
+one. `readCorrections()` parsed the log, `correctionsBlock()` rendered whatever
+`corrections:` front matter a post happened to carry, and no code asked whether
+they agreed.
+
+The result was a correction that was logged, counted valid, published at
+`/corrections/`, and linked from the reader's own page — to a post that showed the
+reader nothing. At `eb7cc0c`, five entries named `morning-briefing-2026-10-03`
+and that page rendered zero Corrections sections, while `npm run check` printed
+`11 post(s) valid, 1 corrections log(s) valid, 7 correction(s)` and passed clean.
+That is BEL-313.
+
+`npm run check` now refuses a logged correction that the post it names does not
+carry:
+
+```
+build.mjs: 6 logged correction(s) name a post that does not carry them. The corrections log is ahead of the copy:
+...
+build.mjs:   /2026-10-03/morning-briefing-2026-10-03/  needs 3 corrections front-matter entry(ies) dated 2026-10-02, 2026-10-02, 2026-10-02; it carries none at all
+```
+
+Three things about that rule are deliberate.
+
+**The match is the date and nothing else.** The log entry carries the full
+editorial record and the front matter carries the reader-facing summary, so the
+two are not required to be the same sentence. Demanding identical prose would make
+this a second copy of the content, and the first time a correction was reworded the
+gate would break for a reason that has nothing to do with the reader.
+
+**A post that is not in the build is a warning, never a refusal.** That is the
+rule above, and it has not changed. A correction must be allowed to outlive its
+post, so requiring the post to exist would make an honest record impossible to
+keep. `--check` prints those entries and counts them, so the case is visible
+without blocking a publish.
+
+**`npm run build` is not affected.** The refusal is `--check` only. A correction
+that is already on the record stays published — deleting it would be the worse
+failure, and the log is append-only — so the site keeps building while the gate is
+red. `/build-info.json` carries `correctionsReconciliation` so a deployed site
+says how much of its own log reached a reader.
+
 Entry prose is rendered as inline markdown by the same renderer a post body uses,
 so a correction that quotes the post it corrects quotes it as the reader sees it.
 That matters most for backticked constructs: a correction citing a status like
@@ -105,8 +148,16 @@ can be checked without reading a build log:
   { "file": "corrections/2026-10.md", "month": "2026-10",
     "url": "/corrections/2026-10/", "entries": 3,
     "title": "Belmont News corrections — October 2026" }
-]
+],
+"correctionsReconciliation": {
+  "checked": 3, "reconciled": 3, "unreconciled": [], "postNotInBuild": []
+}
 ```
+
+`correctionsReconciliation` is the one that says whether those entries reached a
+reader. `entries` counts what the log holds; `reconciled` counts what the posts
+carry. A log that is ahead of its own copy shows up here even when the build is
+green, which is the case `npm run build` has to keep serving — see above.
 
 ## Feed timestamps
 
@@ -367,6 +418,11 @@ If the content directory is missing the build fails with the sync command rather
 than publishing an empty site. A missing corrections directory does not fail:
 that path has no gate and no required content.
 
+It also refuses a logged correction that the post it names does not carry, and
+prints each post with the dates it needs. That is `--check` only — see "The log
+has to reach the post it names" above. A correction whose post is not in the build
+is counted and printed, never refused.
+
 ## Tests
 
 ```
@@ -394,6 +450,13 @@ including the cases where it must exit 2 rather than report that there is nothin
 to do. A check that answered 0 when it could not read the site would freeze the
 front page and still report green every fifteen minutes.
 
+`test/correction-reconciliation.test.mjs` covers the corrections gate, in both
+directions, and its last test reads this repository's own `content/` and
+`corrections/` rather than a fixture, so it cannot pass by being written against a
+tree the newsroom does not publish. That test was red from the moment it landed
+and names the six entries the log was ahead of the copy on; it goes green when
+the store carries the front matter, and nobody has to come back and delete it.
+
 ## Layout
 
 | Path | What it is |
@@ -401,7 +464,7 @@ front page and still report green every fifteen minutes.
 | `build.mjs` | The renderer. Markdown subset, page shells, RSS, sitemap, 404. |
 | `scripts/dates.mjs` | Publication instants for the feed. Zone-aware, no hardcoded offset. |
 | `scripts/expiry.mjs` | The listing window: which posts are still "Latest", and the `expires` override. |
-| `scripts/corrections.mjs` | Reads `corrections/YYYY-MM.md` into entries. |
+| `scripts/corrections.mjs` | Reads `corrections/YYYY-MM.md` into entries, and reconciles them against the posts in the build. |
 | `content/` | Synced copy of the markdown store. Not edited here. |
 | `corrections/` | Synced copy of the corrections log. Not edited here. |
 | `static/styles.css` | The only stylesheet. Print-first, dark-mode aware, no webfont. |

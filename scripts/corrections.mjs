@@ -21,6 +21,10 @@
 //
 // A line that does not open a labelled field continues the field above it, so a
 // long correction may wrap without losing text.
+//
+// This module parses the log and reconciles it against the posts in the build;
+// build.mjs renders and refuses. See reconcileCorrections() for the rule that
+// joins a logged correction to the front matter on the post it names.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -101,6 +105,97 @@ export function parseCorrectionsFile(text, month) {
   // carry no correction text at all, which means the file is malformed there.
   log.entries = log.entries.filter((e) => e.correction);
   return log;
+}
+
+// --------------------------------------------------------- the log against the copy
+//
+// A correction is logged in corrections/YYYY-MM.md AND reflected on the post it
+// names, in that post's `corrections:` front matter. Until this function existed
+// nothing joined the two: readCorrections() parsed the log, correctionsBlock()
+// rendered whatever front matter a post happened to carry, and no code path
+// asked whether they agreed.
+//
+// The result was a correction that was logged, counted valid, published at
+// /corrections/, and linked from the reader's own page -- to a post that showed
+// the reader nothing. On 2026-10-05, at belmont-news-site eb7cc0c, five entries
+// named morning-briefing-2026-10-03 and that page rendered zero Corrections
+// sections. `npm run check` printed "11 post(s) valid, 1 corrections log(s)
+// valid, 7 correction(s)" and passed clean. That is BEL-313.
+//
+// The two directions are not symmetric, and only one of them is a failure:
+//
+//   log -> post   A logged correction with no front-matter entry of the same
+//                 date on the post it names is a FAILURE. The reader has been
+//                 told the story was corrected; the story does not say so.
+//
+//   post -> log   Not checked here, and deliberately. A `corrections:` entry
+//                 with no log entry is the desk correcting itself silently,
+//                 which is a different defect (BEL-323's ruling covers the
+//                 reverse order and this gate is not the place for it).
+//
+//   post missing  A correction that outlives the post it names is a WARNING,
+//                 never a failure. build.mjs already drops the link to a post
+//                 that is not in the build, on purpose, because a dead link in a
+//                 corrections log is worse than plain text. A correction has to
+//                 be able to outlive its post, so requiring the post to exist
+//                 would make an honest record impossible to keep. The warning is
+//                 here so the case is visible without blocking a publish.
+//
+// What "matching" means is the DATE and nothing else. The log entry and the
+// front-matter entry are written by the same desk about the same correction, but
+// the log carries the full editorial record and the front matter carries the
+// reader-facing summary, and they are not required to be the same sentence.
+// Demanding identical prose would make this a second copy of the content and the
+// first thing to break the next time a correction is reworded -- reintroducing
+// the class of defect this gate exists to catch, one level down. Date equality is
+// the smallest thing that cannot be satisfied by accident and still means the
+// reader is told.
+export function reconcileCorrections({ logs, posts }) {
+  const byUrl = new Map();
+  for (const p of posts || []) byUrl.set(p.url, p);
+
+  const unreconciled = [];
+  const unknownPost = [];
+  let checked = 0;
+  let reconciled = 0;
+
+  for (const log of logs || []) {
+    for (const e of log.entries) {
+      checked += 1;
+      const url = `${e.postDate}/${e.slug}/`;
+      const post = byUrl.get(url);
+      const where = {
+        month: log.month,
+        file: `corrections/${log.month}.md`,
+        postDate: e.postDate,
+        slug: e.slug,
+        url,
+        correctionDate: e.correctionDate,
+      };
+
+      if (!post) {
+        unknownPost.push(where);
+        continue;
+      }
+
+      // The front-matter parser gives `corrections:` as a list of objects, one
+      // per entry. Read the dates out and compare them, so a correction whose
+      // prose was reworded on the post still counts as reflected.
+      const postDates = Array.isArray(post.fm && post.fm.corrections)
+        ? post.fm.corrections
+          .map((c) => (c && typeof c === 'object' && !Array.isArray(c) ? String(c.date ?? '').trim() : ''))
+          .filter(Boolean)
+        : [];
+
+      if (postDates.includes(e.correctionDate)) {
+        reconciled += 1;
+      } else {
+        unreconciled.push({ ...where, postDates });
+      }
+    }
+  }
+
+  return { checked, reconciled, unreconciled, unknownPost };
 }
 
 // Read every corrections log in `dir`, newest month first. A missing directory

@@ -507,10 +507,21 @@ test('the committed archive stays inside the window on any day it is built', () 
     const stagedContent = join(staged, 'content');
     cpSync(join(REPO, 'content'), stagedContent, { recursive: true });
 
+    // The corrections gate is pointed at an empty log, deliberately. This loop
+    // peels files off the STAGED tree until the gate is clean, and the only
+    // answer it knows how to give a refusal is to delete the post. That is the
+    // right answer to a bad body and the worst possible answer to an unreconciled
+    // correction, which is fixed by adding front matter to the post rather than by
+    // removing the post. Pointing `--corrections` at an empty directory makes that
+    // structurally impossible. The committed log is gated against the committed
+    // posts by test/correction-reconciliation.test.mjs, which reads both.
+    const stagedCorrections = join(staged, 'corrections');
+    mkdirSync(stagedCorrections, { recursive: true });
+
     // Each pass validates the STAGED copy, so the loop converges: the file it refuses
     // is the file it has just removed. Validating the repository instead would name
     // the same file twenty times and never finish.
-    const gate = () => spawnSync('node', [BUILD, '--content', stagedContent, '--check'], { cwd: REPO, encoding: 'utf8' });
+    const gate = () => spawnSync('node', [BUILD, '--content', stagedContent, '--corrections', stagedCorrections, '--check'], { cwd: REPO, encoding: 'utf8' });
     const blocked = [];
     // build.mjs stops at the first refusal, so each pass names one file. Loop until
     // the archive clears the gate, with a bound so a gate that starts refusing

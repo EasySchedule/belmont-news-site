@@ -244,6 +244,16 @@ test('every post in the committed content snapshot names its sources', () => {
     const stagedContent = join(staged, 'content');
     cpSync(join(REPO, 'content'), stagedContent, { recursive: true });
 
+    // The corrections gate is pointed at an empty log, deliberately. The gate below
+    // peels files off the STAGED tree, and the only answer it knows how to give a
+    // refusal is to delete the post. That is right for a bad body and the worst
+    // possible answer to an unreconciled correction, which is fixed by adding front
+    // matter to the post rather than by removing the post. An empty corrections
+    // directory makes that structurally impossible. The committed log is gated
+    // against the committed posts by test/correction-reconciliation.test.mjs.
+    const stagedCorrections = join(staged, 'corrections');
+    mkdirSync(stagedCorrections, { recursive: true });
+
     const markdown = [];
     (function walk(dir) {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -260,7 +270,7 @@ test('every post in the committed content snapshot names its sources', () => {
     // directory, so keep only the part under content/ and join it back.
     const blocked = [];
     for (let pass = 0; pass < 20; pass++) {
-      const gate = spawnSync('node', [BUILD, '--content', stagedContent, '--check'], { cwd: REPO, encoding: 'utf8' });
+      const gate = spawnSync('node', [BUILD, '--content', stagedContent, '--corrections', stagedCorrections, '--check'], { cwd: REPO, encoding: 'utf8' });
       if (gate.status === 0) break;
       const m = /build\.mjs: ([^:]+\.md):/.exec(gate.stderr || '');
       if (!m) throw new Error(`the body gate failed without naming a file:\n${gate.stderr}`);
