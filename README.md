@@ -450,9 +450,10 @@ so a second copy of this site is being served from there right now. It cannot be
 current unless its build syncs the store, which it now does, but it is still not
 the publish path and not the URL to give a reader. See "Hosting" below.
 
-Push to `main` and `pages.yml` publishes. That workflow is the only thing in
-this repository that builds or deploys; every other route into publishing ends
-by dispatching it.
+Pushes to `main` run `pages.yml`, which publishes GitHub Pages. That is the newsroom's
+only publish path, and every other route into publishing ends by dispatching it. Netlify
+also builds from pushes to `main`, but it builds a separate host that is not the publish
+path; see "Hosting" below.
 
 ### A blogs merge publishes the site
 
@@ -522,8 +523,8 @@ fifteen-minute schedule, because the site can be behind for two unrelated reason
 
 Either one dispatches `pages.yml`, through a single dispatch job, so a morning
 that is both behind on content and a day old in the listing still spends one
-deploy. `pages.yml` remains the only thing in this repository that builds or
-deploys.
+deploy. `pages.yml` remains the newsroom's only publish path; Netlify builds a
+separate host from the same pushes and is not part of it.
 
 Without the second check the failure is quiet and easy to miss: on a day when
 nothing was filed, the store head matches the published head, the drift check
@@ -606,6 +607,25 @@ Exit 1 and exit 2 are separate on purpose. A host answering 200 with the wrong b
 fact about that host; an unreachable host is a fact about this run. Merging them is how a network
 blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
 failure line names the host and the marker, so the log says which thing broke.
+
+**Behind is not stale, and the difference is the window.** A merge to the store does not publish;
+the `*/15` cron does, and GitHub queues it. So for the first minutes after a merge the publish path
+is *supposed* to be behind, and a check that exits 1 for that goes red on every merge. The first
+version of this script did exactly that, which is the disease it was written to cure: a check that
+is red most of the time is a check nobody reads. A mismatch is therefore a failure only once the
+store commit is older than the publish window -- 30 minutes by default, the cron plus one missed
+slot, overridable with `PUBLISH_WINDOW_MINUTES`. Inside the window the host is reported `BEHIND`
+and exits 0:
+
+```
+check-hosts: BEHIND github-pages [publish-path] https://easyschedule.github.io/belmont-news-site
+check-hosts:        ... is BEHIND, not stale: rendered 2d09294f, store 29adf631 is 13 min old,
+                    inside the 30 min publish window. The cron has not run yet.
+```
+
+Past the window the same host exits 1 and says it is stale. An age that cannot be read exits 2
+rather than being assumed young: guessing "still publishing" would convert an unknown into a
+pass, which is the one thing this check exists to prevent.
 
 All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
 or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`

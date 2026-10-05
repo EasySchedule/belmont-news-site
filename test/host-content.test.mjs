@@ -83,6 +83,10 @@ async function check(hosts, env = {}) {
       ...process.env,
       HOSTS_FILE: file,
       EXPECT_CONTENT_HEAD: 'a'.repeat(40),
+      // Old enough to be unambiguously drift by default. Tests that are about the
+      // window set this themselves, and a test that forgets gets a stale answer
+      // rather than a silently-passing one.
+      STORE_HEAD_AGE_MINUTES: '600',
       ...env,
     });
   } finally {
@@ -169,10 +173,106 @@ test('a stale news host exits 1 and names both commits', async () => {
     assert.equal(r.code, 1);
     assert.match(r.stdout, /rendered store commit bbbbbbbb/);
     assert.match(r.stdout, /aaaaaaaa is current/);
+    assert.match(r.stdout, /past the 30 min publish window/);
   } finally {
     server.closeAllConnections();
     server.close();
   }
+});
+
+// ------------------------------- behind is not stale, or this check cries wolf
+
+test('a host behind a store commit inside the publish window exits 0 and says BEHIND', async () => {
+  // The case that made the first version of this check wrong. A merge to the store
+  // does not publish; the */15 cron does, and GitHub queues it. Exiting 1 in that
+  // window means this check fails after every merge, and a check that is red most of
+  // the time is one nobody reads -- which is how BEL-199 happened in the first place.
+  const server = await serve({
+    '/build-info.json': { status: 200, body: buildInfo('b'.repeat(40)), type: 'application/json' },
+  });
+  try {
+    const r = await check({
+      store: 'x/y', storeRef: 'main',
+      hosts: [withHost(`http://127.0.0.1:${server.address().port}`, { id: 'github-pages' }, { expect: 'build-info', requireCurrentStore: true })],
+    }, { STORE_HEAD_AGE_MINUTES: '7' });
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /BEHIND github-pages/);
+    assert.match(r.stdout, /7 min old, inside the 30 min publish window/);
+    assert.match(r.stdout, /1 behind but inside the publish window/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a host behind by one minute past the window exits 1', async () => {
+  // The boundary is the boundary. If 30 minutes is not enforced, the window is a
+  // suggestion and the check will be green through a real outage.
+  const server = await serve({
+    '/build-info.json': { status: 200, body: buildInfo('b'.repeat(40)), type: 'application/json' },
+  });
+  try {
+    const r = await check({
+      store: 'x/y', storeRef: 'main',
+      hosts: [withHost(`http://127.0.0.1:${server.address().port}`, { id: 'github-pages' }, { expect: 'build-info', requireCurrentStore: true })],
+    }, { STORE_HEAD_AGE_MINUTES: '31' });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /WRONG github-pages/);
+    assert.match(r.stdout, /This is stale/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('an unreadable commit age is UNKNOWN, never quietly inside the window', async () => {
+  // The dangerous direction. Guessing "young" turns an unreadable clock into a
+  // passing host, which is the exact conversion of unknown into known-good that
+  // this whole check is against.
+  const server = await serve({
+    '/build-info.json': { status: 200, body: buildInfo('b'.repeat(40)), type: 'application/json' },
+  });
+  try {
+    const r = await check({
+      store: 'x/y', storeRef: 'main',
+      hosts: [withHost(`http://127.0.0.1:${server.address().port}`, { id: 'github-pages' }, { expect: 'build-info', requireCurrentStore: true })],
+    }, { STORE_HEAD_AGE_MINUTES: '' });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /UNKNOWN github-pages/);
+    assert.match(r.stderr, /could not read the age/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a current host does not need a clock, so an unreadable one does not fail it', async () => {
+  // The opposite trap. Fetching a clock for a comparison that will not be made is a
+  // second thing that can fail, and a host serving the current commit has answered
+  // the question regardless of whether a feed was readable.
+  const server = await serve({
+    '/build-info.json': { status: 200, body: buildInfo('a'.repeat(40)), type: 'application/json' },
+  });
+  try {
+    const r = await check({
+      store: 'x/y', storeRef: 'main',
+      hosts: [withHost(`http://127.0.0.1:${server.address().port}`, { id: 'github-pages' }, { expect: 'build-info', requireCurrentStore: true })],
+    }, { STORE_HEAD_AGE_MINUTES: '' });
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /OK {5}github-pages/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('the window is one policy value, not a constant buried in a comparison', async () => {
+  // Pinned so that changing 30 means somebody looked. The default is the 15-minute
+  // cron plus one missed slot, and that relationship is the reason for the number.
+  const src = readFileSync(CHECK, 'utf8');
+  assert.match(src, /PUBLISH_WINDOW_MINUTES = Number\(process\.env\.PUBLISH_WINDOW_MINUTES \|\| 30\)/);
+  assert.match(src, /storeAgeMinutes <= PUBLISH_WINDOW_MINUTES/);
+  assert.match(src, /inside the \$\{PUBLISH_WINDOW_MINUTES\} min publish window/);
 });
 
 test('an unreachable host exits 2, which is not 1 and not 0', async () => {
@@ -242,8 +342,8 @@ test('a host serving our content exits 0', async () => {
     });
     assert.equal(r.code, 0);
     assert.match(r.stdout, /2\/2 hosts served/);
-    assert.match(r.stdout, /OK    pages/);
-    assert.match(r.stdout, /OK    app/);
+    assert.match(r.stdout, /OK {5}pages/);
+    assert.match(r.stdout, /OK {5}app/);
   } finally {
     server.closeAllConnections();
     server.close();
