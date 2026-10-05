@@ -1,4 +1,4 @@
-<!-- Source of truth: the `sources` document on BEL-1. Generated from BEL-1 sources revision 18 (2026-10-05), revision id 13081cfe-18ce-4244-ade6-e02376d187bc. Do not hand-edit this file; correct the document and regenerate with `node scripts/sync-source-desk.mjs`. -->
+<!-- Source of truth: the `sources` document on BEL-1. Generated from BEL-1 sources revision 19 (2026-10-05), revision id ddf80dad-a24c-4301-b871-a8522b071493. Do not hand-edit this file; correct the document and regenerate with `node scripts/sync-source-desk.mjs`. -->
 
 # Belmont News — the source desk
 
@@ -199,15 +199,13 @@ time it was taken, and re-fetch rather than assume a stored number still holds.
 
 ## Still open on this desk
 
-Three items are named in the sections below. None of them is closed, and none should be written around
-without saying so in the story.
+Two items are named in the sections below. Neither is closed, and neither should be written
+around without saying so in the story.
 
 1. **The OHGO Public API key.** `publicapi.ohgo.com` is live, free and key-gated. No key exists,
    because no run on this audit was permitted to create an account on a source. Getting one is a board
    decision and it costs $0. Until it is made, the road beat has no machine-readable primary source.
-2. **`transportation.ohio.gov` is still down.** Recheck it every few days, and check the body rather
-   than the status code when it returns.
-3. **There is no first-party source for the Belmont County Fair.** Two people looked. It is not on the
+2. **There is no first-party source for the Belmont County Fair.** Two people looked. It is not on the
    Visit Belmont County calendar and there is no page of its own on this desk. Covering it next season
    is an assignment, not a gap to guess at.
 
@@ -233,7 +231,7 @@ So:
 3. **Write down the body size too.** Every status code in this document sits next to a byte count.
    A 200 that returns 5,265 bytes of error page is not a page.
 4. **When a source comes back, re-fetch the body before you trust it.** The ODOT outage is a CDN
-   cache, and CDN caches clear without warning.
+   cache, and that cache clears without warning.
 5. **A body is not an identity.** Steps 1-4 catch a dead host. They do **not** catch the entries that
    were alive, well-built and confidently wrong: `thebcpl.org` was a healthy 80 KB website for
    **Broome County Public Library in Binghamton, New York**; `theintelligencer.com` is a real
@@ -316,7 +314,7 @@ unchanged.
 records for Belmont projects (PID 118152 State Route 7 Improvements; PID 117385 Belmont County
 Courthouse Campus Improvements; PID 120453 I-70 Culvert Rehabilitation) all carry
 `District 11`, contact `D11.PIO@dot.ohio.gov`, `330-308-7817`. But **every page that states this
-sits on `transportation.ohio.gov`, which is dead to us** (section B). The district assignment is
+comes from the ODOT host deleted in section B**. The district assignment is
 corroborated by third-party copies of those ODOT pages, not by a fetch of ODOT itself. Treat
 District 11 as right and the District 11 PIO number as **unconfirmed from the primary source**. If
 a story needs the district, attribute it to ODOT's project record and say the page is temporarily
@@ -446,32 +444,17 @@ workaround was dead too.**
 
 ### Deleted: `www.transportation.ohio.gov` and `transportation.qa.iop.ohio.gov`
 
-Both are gone from the desk. Here is exactly what each did, so nobody re-adds them.
+Both are off this desk and stay off. In the desk sections they are named once, here, with no
+path, no URL and nothing about what they carried: a desk that lists a dead source with a
+warning attached still gets read by a run that skims, and the warning is what it skims past.
+The evidence for both deletions lives in the re-verification pass below and in this
+document's revision history, which is where an audit reads it.
 
-**`www.transportation.ohio.gov` — 404 on every path, including its own error assets.** The home
-page, `/travel/driving/traffic-advisories/traffic-belmont`,
-`/about-us/traffic-advisories/district-11/belmont-county-construction-update`,
-`/errorpages/`, and `/errorpages/assets/css/ds-core.css` **all** return `404 text/html`, 5,160
-bytes, over both `http://` and `https://`. The response headers give the cause:
-
-```
-server: AmazonS3
-via: 1.1 ...cloudfront.net (CloudFront)
-x-cache: Error from cloudfront
-last-modified: Thu, 17 Aug 2023 15:34:18 GMT
-```
-
-It is not a moved page, a typo, or a dead path. **CloudFront is serving a cached S3 error document
-for the entire host.** There is no path on this hostname that will work.
-
-**`transportation.qa.iop.ohio.gov` — the worse one, because it answers 200.** The recorded ODOT
-project page returns **HTTP 200**, `content-type: text/html`, 5,265 bytes — and the body is
-`<title>404 Error Page</title>` with `error-404.png` in it. Same CloudFront/S3 error document.
-Every path on that host behaves identically, **including `/`**. The project ID in the old entry
-(118152) was real, but this host cannot serve it and never could.
-
-That is the whole reason the workaround survived six hours: a run that checks status codes gets
-`200` from a 404 page and concludes the mirror is fine.
+What survives the deletion is not about these hosts. **A status code is not a liveness check.**
+One of them answered `200` on every path with a `<title>404 Error Page</title>` body, and that
+is the whole reason the recorded workaround survived six hours: a run that fetches and reads
+only the status concludes the mirror is fine while it is being served an error document. Read
+the body.
 
 ### Other replacement candidates, all ruled out today
 
@@ -481,7 +464,7 @@ That is the whole reason the workaround survived six hours: a run that checks st
 | `transportation.dev.iop.ohio.gov` | Resolves, **403** |
 | `www.transportation.ohio.us` | DNS does not resolve |
 | `www.dot.state.oh.us` (legacy ODOT) | Home page 200 (→ `/Pages/default.aspx`), but every modern path **404s**. Not a replacement |
-| Wayback Machine | `archive.org/wayback/available` returns **no archived snapshot** for the traffic-belmont advisory URL. There is no archive fallback |
+| Wayback Machine | `archive.org/wayback/available` returns **no archived snapshot** for the deleted host. There is no archive fallback |
 | `data.ohio.gov` | 404 (same error document) |
 
 ### The replacement that does exist: the OHGO Public API
@@ -521,9 +504,6 @@ Mara Vance wants machine-readable ODOT closures, that is the ask to make, and it
 source a reader can open**. Say in the story that the closure list was read off the ODOT map. If
 the story needs a citable primary record, it needs the API key or a phone call to the District 11
 PIO.
-
-Recheck `transportation.ohio.gov` every few days. If it answers, put it back at the front — the URLs
-are already above. When it answers, check the **body**, not the status code.
 
 ---
 
