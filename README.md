@@ -450,9 +450,10 @@ so a second copy of this site is being served from there right now. It cannot be
 current unless its build syncs the store, which it now does, but it is still not
 the publish path and not the URL to give a reader. See "Hosting" below.
 
-Push to `main` and `pages.yml` publishes. That workflow is the only thing in
-this repository that builds or deploys; every other route into publishing ends
-by dispatching it.
+Pushes to `main` run `pages.yml`, which publishes GitHub Pages. That is the newsroom's
+only publish path, and every other route into publishing ends by dispatching it. Netlify
+also builds from pushes to `main`, but it builds a separate host that is not the publish
+path; see "Hosting" below.
 
 ### A blogs merge publishes the site
 
@@ -522,8 +523,8 @@ fifteen-minute schedule, because the site can be behind for two unrelated reason
 
 Either one dispatches `pages.yml`, through a single dispatch job, so a morning
 that is both behind on content and a day old in the listing still spends one
-deploy. `pages.yml` remains the only thing in this repository that builds or
-deploys.
+deploy. `pages.yml` remains the newsroom's only publish path; Netlify builds a
+separate host from the same pushes and is not part of it.
 
 Without the second check the failure is quiet and easy to miss: on a day when
 nothing was filed, the store head matches the published head, the drift check
@@ -607,7 +608,40 @@ fact about that host; an unreachable host is a fact about this run. Merging them
 blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
 failure line names the host and the marker, so the log says which thing broke.
 
-All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
-or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`
-covers it, including a test that fails if the record ever grows a `expectedStatus`-style field.
+**A mismatch is a failure, including when the served head is an ancestor of the expected one.**
+`build-info.json` carries the store commit the page was rendered from, so the assertion is on that
+commit and on nothing else. Not the status code, not `generated` or `contentSyncedAt`, and not the
+cache headers -- on 2026-10-05 the publish path served an ancestor of the store head while
+reporting `x-cache: HIT` with `age: 9` and a plausible `generated` time, and a version of this
+check that treated a young store commit as "still publishing" called all of that fine.
+
+Which kind of wrong it is comes from the store's real history, fetched anonymously:
+
+| Verdict | Served head | Meaning |
+|---|---|---|
+| `STALE` | an ancestor of the expected head | an older edition is live |
+| `WRONG` | in the store, not an ancestor | not built from this branch |
+| `WRONG` | not a commit in the store at all | something else is served under our URL |
+| `UNKNOWN` | history unreadable, so unclassifiable | exit 2, never a pass |
+
+The age of the store head is printed on the failure line, because "a merge from four minutes ago
+the cron has not seen yet" and "the store has been ahead since Tuesday" are the same exit code and
+different responses. It does not get a vote on the verdict.
+
+Every failure line names the head it actually served, in full, and the timestamp it claimed:
+
+```
+check-hosts: STALE   github-pages [publish-path] https://easyschedule.github.io/belmont-news-site
+check-hosts:        ... served head 29adf631d9..., stamped 2026-10-05T17:40:46.670Z. It is an
+                    ancestor of store main 4164531c, so this page was built from an older commit
+                    of the store and is serving a stale edition. Store main is 4164531c and that
+                    head is 32 min old.
+```
+
+All reads are anonymous, so this needs no token and no credential, and `git` is invoked with
+credential helpers disabled and prompts off so it cannot acquire one. Run it by hand after any
+deploy, or any time someone is about to describe a host's health in prose.
+`test/host-content.test.mjs` covers it against a real commit graph over `file://`, including tests
+that fail if the record ever grows a `expectedStatus`-style field, if any header becomes part of
+the assertion, or if an age-based exemption comes back.
 
