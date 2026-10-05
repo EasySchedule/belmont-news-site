@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -226,19 +226,80 @@ test('every post in the committed content snapshot names its sources', () => {
     assert.match(stdout, new RegExp(`built ${markdown.length} post\\(s\\)`));
     for (const file of markdown) {
       // content/YYYY/MM/YYYY-MM-DD/author--slug.md renders to YYYY-MM-DD/slug.
+      //
+      // The filename carries the slug the page is written to, so the shape of
+      // the filename is the shape of the URL. That is the contract BEL-207 is
+      // about, and it used to be asserted by an accident of this line:
+      //
+      //   parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')
+      //
+      // A post filed without the segment gave `undefined` here and raised
+      // `TypeError: Cannot read properties of undefined (reading 'replace')`
+      // from inside the test body. On the publish path that is a failed deploy
+      // whose log names neither the file nor the rule: BEL-69 spent an outage
+      // working that out. build.mjs itself was never involved. It reads the
+      // slug out of the front matter (`url: ${data.date}/${data.slug}/`) and
+      // builds the post perfectly well under either filename; it was this
+      // reconstruction of the output path that was strict.
+      //
+      // So assert it, rather than trip over it. A named file and a named rule
+      // at the point of failure, which is what a test on the publish path owes
+      // whoever is reading the log at 06:00.
       const parts = file.split(sep);
-      const p = `${parts[parts.length - 2]}/${parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')}`;
+      const dayFolder = parts[parts.length - 2];
+      const name = parts[parts.length - 1];
+      const stem = name.replace(/\.md$/, '');
+      const segments = stem.split('--');
+      assert.equal(
+        segments.length, 2,
+        `${file.replace(`${REPO}/`, '')}: a post is filed as <author-slug>--<slug>.md, and this filename has ${segments.length} segment(s). The slug segment is required, because the URL this post publishes to is read out of the filename. Rename it <author-slug>--<front-matter-slug>.md.`,
+      );
+      assert.ok(segments[1].length > 0, `${file.replace(`${REPO}/`, '')}: the slug segment is empty`);
+
+      // The filename and the front matter must name the same post. This is the
+      // half of the contract that matters: belmont-news-blogs/index.mjs requires
+      // the segment (BEL-207), and this is where a store that got past it anyway
+      // is caught on the publish path, naming this file.
+      const fmSlug = frontMatterSlugOf(file);
+      assert.equal(
+        segments[1], fmSlug,
+        `${file.replace(`${REPO}/`, '')}: the filename slug '${segments[1]}' is not the post's front matter slug '${fmSlug}'.`,
+      );
+
+      const p = `${dayFolder}/${segments[1]}`;
       const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
       const s = sourcesSection(html);
       assert.notEqual(s, '', `${p} rendered no sources section at all`);
       assert.doesNotMatch(s, /<\/span>\s*\./, `${p} rendered a source with no name`);
       const items = s.match(/<li>/g) || [];
       assert.ok(items.length >= 3, `${p} rendered ${items.length} source(s)`);
+
+      // And the page is at the URL the filename promises. Without this the two
+      // assertions above only describe the filename; this ties it to something
+      // a reader can reach.
+      const fmDate = frontMatterDateOf(file);
+      assert.ok(
+        existsSync(join(out, ...`${fmDate}/${fmSlug}`.split('/'), 'index.html')),
+        `${file.replace(`${REPO}/`, '')}: the build wrote this post to /${fmDate}/${fmSlug}/ but its filename promises /${dayFolder}/${segments[1]}/`,
+      );
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+// The post's own `slug:` and `date:` lines, read straight out of the file.
+//
+// Deliberately not build.mjs's front matter parser: this file's job is to check
+// the store that build.mjs is about to be handed, so it must not parse it the
+// same way build.mjs does. A test that shared the parser would agree with a
+// regression in the parser.
+function frontMatterFieldOf(file, field) {
+  const m = new RegExp(`^${field}:[ \\t]*['"]?([^'"\\s#]+)['"]?[ \\t]*$`, 'm').exec(readFileSync(file, 'utf8'));
+  return m ? m[1] : null;
+}
+const frontMatterSlugOf = (file) => frontMatterFieldOf(file, 'slug');
+const frontMatterDateOf = (file) => frontMatterFieldOf(file, 'date');
 
 // ------------------------------------------------------- the reader sees a correction
 
