@@ -9,7 +9,7 @@
 //
 // Credentials come from the environment. Nothing here prints a token.
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -93,6 +93,7 @@ async function main() {
     return 0;
   }
 
+  await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, expected, 'utf8');
   console.log(`Wrote ${TARGET} from BEL-1 ${DOC_KEY} revision ${doc.revisionNumber} (${doc.revisionId}).`);
   return 0;
