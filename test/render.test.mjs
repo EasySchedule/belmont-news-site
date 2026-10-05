@@ -8,10 +8,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, resolve, sep } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -201,13 +201,49 @@ test('a post missing its byline stops the build', () => {
 
 // ------------------------------------------------------------ the real archive
 
+// Where the builder put a post's page: `date`/`slug` out of the front matter,
+// exactly as build.mjs reads them (`url: `${data.date}/${data.slug}/``).
+//
+// This used to split the filename on `--` and take the second half. That threw
+// on the short form `content/<Y>/<M>/<day>/<author-slug>.md`, which the filing
+// rule in the blogs repository allows whenever a writer files one post that day
+// ("It is optional: use the short form when a writer files one post that day"),
+// and `index.mjs --check` accepts it. There was no `--` to split, so
+// `split('--')[1]` was undefined and this line raised
+// `TypeError: Cannot read properties of undefined (reading 'replace')`. Because
+// the renderer tests run inside pages.yml, on the publish path, that took the
+// deploy down with it: a legal filing red the build at 15:25:06Z on the BEL-37
+// publish and no page reached readers.
+//
+// The filename is not the address of a post and never was. build.mjs reads the
+// whole front matter and writes to date/slug, so a post filed under the short
+// form, or under any other name, still lands where the front matter says. Ask
+// the front matter the same way and the two forms stop being different.
+function builtPath(file) {
+  const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(file, 'utf8'));
+  assert.ok(front, `${file} has no front matter block`);
+  const scalar = (key) => {
+    const m = new RegExp(`^${key}:[ \\t]*(.*)$`, 'm').exec(front[1]);
+    assert.ok(m, `${file} has no ${key} in its front matter`);
+    const v = m[1].trim();
+    const q = /^"(.*)"$/.exec(v) || /^'(.*)'$/.exec(v);
+    return q ? q[1] : v;
+  };
+  return `${scalar('date')}/${scalar('slug')}`;
+}
+
 test('every post in the committed content snapshot names its sources', () => {
   const out = mkdtempSync(join(tmpdir(), 'belmont-real-'));
+  // The archive is staged into a temp directory and built from the copy. One
+  // committed file is refused by the body gate added for BEL-161, because its body
+  // is a Paperclip document API response rather than the article, and it cannot
+  // render at all. This test is about sources, so it renders the rest and reports
+  // what it had to leave out rather than quietly covering less than it used to.
+  const staged = mkdtempSync(join(tmpdir(), 'belmont-real-content-'));
   try {
-    // Walk the committed snapshot instead of naming today's posts. A hardcoded
-    // list and a hardcoded count both rot on the next publish, and this test now
-    // runs on the publish path too: a fifth post would have failed the deploy
-    // over a stale number rather than over anything a reader would see.
+    const stagedContent = join(staged, 'content');
+    cpSync(join(REPO, 'content'), stagedContent, { recursive: true });
+
     const markdown = [];
     (function walk(dir) {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -215,19 +251,54 @@ test('every post in the committed content snapshot names its sources', () => {
         if (e.isDirectory()) walk(p);
         else if (e.name.endsWith('.md')) markdown.push(p);
       }
-    })(join(REPO, 'content'));
+    })(stagedContent);
     assert.ok(markdown.length > 0, 'the committed snapshot has no posts in it');
+    const committed = markdown.length;
 
-    const stdout = execFileSync('node', [BUILD, '--content', 'content', '--out', out, '--site-url', 'https://example.test'], {
+    // build.mjs stops at the first refusal, so each pass names one file. The name it
+    // prints is relative to its own working directory, which is not the staged
+    // directory, so keep only the part under content/ and join it back.
+    const blocked = [];
+    for (let pass = 0; pass < 20; pass++) {
+      const gate = spawnSync('node', [BUILD, '--content', stagedContent, '--check'], { cwd: REPO, encoding: 'utf8' });
+      if (gate.status === 0) break;
+      const m = /build\.mjs: ([^:]+\.md):/.exec(gate.stderr || '');
+      if (!m) throw new Error(`the body gate failed without naming a file:\n${gate.stderr}`);
+      const parts = m[1].split(/[/\\]/).slice(-4);
+      if (parts.length !== 4) throw new Error(`cannot resolve ${m[1]} against the staged archive`);
+      const file = parts.join('/');
+      if (blocked.includes(file)) throw new Error(`the body gate named ${file} twice without advancing`);
+      blocked.push(file);
+      rmSync(join(stagedContent, ...parts));
+    }
+    assert.deepEqual(
+      blocked, [],
+      `the committed archive cannot be published. ${blocked.length} file(s) are refused by the body gate:\n`
+      + blocked.map((f) => `  ${f}`).join('\n')
+      + '\nReplace the body of each with the markdown, not the document record.',
+    );
+
+    const buildable = (function walk(dir) {
+      const found = [];
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) found.push(...walk(p));
+        else if (e.name.endsWith('.md')) found.push(p);
+      }
+      return found;
+    })(stagedContent);
+
+    const stdout = execFileSync('node', [BUILD, '--content', stagedContent, '--out', out, '--site-url', 'https://example.test'], {
       cwd: REPO,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    assert.match(stdout, new RegExp(`built ${markdown.length} post\\(s\\)`));
-    for (const file of markdown) {
-      // content/YYYY/MM/YYYY-MM-DD/author--slug.md renders to YYYY-MM-DD/slug.
-      const parts = file.split(sep);
-      const p = `${parts[parts.length - 2]}/${parts[parts.length - 1].split('--')[1].replace(/\.md$/, '')}`;
+    assert.match(stdout, new RegExp(`built ${buildable.length} post\\(s\\)`));
+    assert.equal(buildable.length, committed, 'no post is dropped from this test without saying so');
+    for (const file of buildable) {
+      // The same derivation every other test uses: build.mjs writes to
+      // date/slug out of the front matter, so ask the front matter.
+      const p = builtPath(file);
       const html = readFileSync(join(out, ...p.split('/'), 'index.html'), 'utf8');
       const s = sourcesSection(html);
       assert.notEqual(s, '', `${p} rendered no sources section at all`);
@@ -237,6 +308,64 @@ test('every post in the committed content snapshot names its sources', () => {
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
+    rmSync(staged, { recursive: true, force: true });
+  }
+});
+
+test('both filing-rule filename forms publish the page the front matter names', () => {
+  // README.md and CONTRIBUTING.md allow both
+  // `content/<Y>/<M>/<day>/<author-slug>--<slug>.md` and the short
+  // `content/<Y>/<M>/<day>/<author-slug>.md` ("It is optional: use the short
+  // form when a writer files one post that day"), and `index.mjs --check` takes
+  // the short form. Every post in the archive happens to carry a `--`, so
+  // nothing covered the short form: a legal filing red the deploy because the
+  // snapshot test above split the filename on a separator the short form does
+  // not have. Build both here, so the next reporter who uses the short form
+  // gets a page instead of a dead publish.
+  const root = mkdtempSync(join(tmpdir(), 'belmont-bothforms-'));
+  try {
+    const day = join(root, 'content', '2026', '10', '2026-10-02');
+    mkdirSync(day, { recursive: true });
+    // Three sources, the same floor the snapshot test holds the archive to, so
+    // this checks a short-form post publishes a complete page and not only a
+    // directory.
+    const sources = `${SOURCES}
+  - type: document
+    title: "Belmont County EMA, overnight rainfall totals"
+    organization: "Belmont County Emergency Management Agency"
+    retrieved: 2026-10-02
+    url: "https://belmontcountyoh.gov/ema/rainfall"`;
+    const posts = [
+      { file: 'nathan-beausoleil--the-long-form-still-publishes.md', slug: 'the-long-form-still-publishes' },
+      { file: 'priya-raghunathan.md', slug: 'the-short-form-publishes-too' },
+    ];
+    for (const { file, slug } of posts) {
+      const front = FRONT.replace(/^slug: .*$/m, `slug: ${slug}`);
+      writeFileSync(join(day, file), `---\n${front}\n${sources}\n---\n\n## The post\n\nRain tonight, then a dry weekend.\n`);
+    }
+
+    const stdout = execFileSync('node', [BUILD, '--content', join(root, 'content'), '--out', join(root, 'dist'), '--site-url', 'https://example.test'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    assert.match(stdout, /built 2 post\(s\)/);
+
+    for (const { file, slug } of posts) {
+      // Go through the same derivation the snapshot test uses, so this covers
+      // the line that threw rather than only the builder.
+      assert.equal(builtPath(join(day, file)), `2026-10-02/${slug}`);
+      const s = sourcesSection(readFileSync(join(root, 'dist', '2026-10-02', slug, 'index.html'), 'utf8'));
+      assert.notEqual(s, '', `${slug} rendered no sources section at all`);
+      assert.doesNotMatch(s, /<\/span>\s*\./, `${slug} rendered a source with no name`);
+      assert.ok((s.match(/<li>/g) || []).length >= 3, `${slug} rendered fewer than three sources`);
+    }
+
+    // The filename is not the address of a post. A short-form post publishes
+    // where its front matter says, not where it happens to sit on disk.
+    assert.ok(!existsSync(join(root, 'dist', '2026-10-02', 'priya-raghunathan')), 'the filename leaked into the URL');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -372,7 +501,16 @@ function renderCorrections(log) {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      return { code: 0, stdout, stderr: '', html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8') };
+      return {
+        code: 0,
+        stdout,
+        stderr: '',
+        html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8'),
+        // The sitemap is written by this same build and carries the lastmod the
+        // tests below are about, so it is read here rather than by a second
+        // build with the same fixture.
+        sitemap: readFileSync(join(root, 'dist', 'sitemap.xml'), 'utf8'),
+      };
     } catch (e) {
       return { code: e.status, stdout: e.stdout || '', stderr: e.stderr || '', html: '' };
     }
@@ -472,4 +610,109 @@ ${entry('2026-10-02', 'first, printed \`NONE\`')}${entry('2026-10-02', 'second, 
   assert.match(texts[0], /first, printed <code>NONE<\/code>/);
   assert.match(texts[1], /second, printed 33 percent/);
   assert.match(texts[2], /third, printed <code>in_progress<\/code>/);
+});
+
+// ---------------------------------------------- what the sitemap tells a crawler
+//
+// The defect BEL-137 found. `lastmod` for /corrections/2026-10/ read
+// log.entries[0], and the log is append-only, so that is its OLDEST entry. Three
+// corrections appended on 2026-10-03 sat on a page the sitemap still dated
+// 2026-10-02, and the two they superseded are the entries a reader most needs to
+// reach. Not a cosmetic date.
+
+const correctionEntryFixture = (postDate, correctionDate, what) => `## ${postDate} — morning-briefing-${postDate}
+
+Correction (${correctionDate}): ${what}
+Published in: the 06:00 edition of Saturday ${postDate}.
+Corrected by: Rosalind Kimbrough.
+`;
+
+const lastmodFor = (sitemap, url) => {
+  const m = new RegExp(`<loc>https://example\\.test/${url}</loc>\\s*<lastmod>([^<]+)</lastmod>`).exec(sitemap);
+  return m ? m[1] : null;
+};
+
+test("a corrections page's lastmod is the newest correction on it, not the oldest", () => {
+  const r = renderCorrections(`# Belmont News corrections — October 2026
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'the first correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'the second correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-03', 'the third, superseding the first two')}`);
+  assert.equal(r.code, 0, r.stderr);
+  // The page really does carry the later correction, so a stale lastmod cannot be
+  // explained away by there being nothing newer to report.
+  assert.match(r.html, /Correction \(<time datetime="2026-10-03"/);
+  assert.equal(lastmodFor(r.sitemap, 'corrections/2026-10/'), '2026-10-03');
+});
+
+test('appending a newer correction moves lastmod forward with it', () => {
+  // On a log whose newest entry happens to be its first, the old code looked
+  // right. Growing that same log by one entry is what has to move the date, and
+  // this is the assertion that fails on main.
+  const one = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-02', 'the only one so far')}`);
+  const two = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-02', 'the only one so far')}
+${correctionEntryFixture('2026-10-03', '2026-10-03', 'appended a day later')}`);
+  assert.equal(one.code, 0, one.stderr);
+  assert.equal(two.code, 0, two.stderr);
+  assert.equal(lastmodFor(one.sitemap, 'corrections/2026-10/'), '2026-10-02');
+  assert.equal(lastmodFor(two.sitemap, 'corrections/2026-10/'), '2026-10-03', 'an appended correction must move the date a crawler reads');
+});
+
+test('no lastmod anywhere in the sitemap is a partial date', () => {
+  // `2026-10` is legal in the sitemap protocol and rejected or coerced by a
+  // number of parsers. It is what /corrections/ carried. A partial date in this
+  // document means the old fallback came back into use.
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'one correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const found = [...r.sitemap.matchAll(/<lastmod>([^<]+)<\/lastmod>/g)].map((m) => m[1]);
+  assert.ok(found.length, 'the fixture must produce at least one lastmod or this proves nothing');
+  for (const d of found) assert.match(d, /^\d{4}-\d{2}-\d{2}$/, `lastmod ${d} is not a full date`);
+});
+
+test('the corrections index carries the newest date on any month page beneath it', () => {
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-03', '2026-10-02', 'one correction')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'a later correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(lastmodFor(r.sitemap, 'corrections/'), '2026-10-04');
+});
+
+test('a log with no corrections omits lastmod rather than inventing one', () => {
+  // A log that names no correction has no modification date to report. lastmod is
+  // optional in the protocol, so the element is dropped rather than filled in
+  // with the month, which is how the partial date got there.
+  const r = renderCorrections('# Log\n\nNothing has been corrected yet.\n');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.sitemap, /<loc>https:\/\/example\.test\/corrections\/2026-10\/<\/loc>/, 'the month page is still published');
+  assert.equal(lastmodFor(r.sitemap, 'corrections/2026-10/'), null, 'no correction means no date to claim');
+});
+
+test("a post's own sitemap entry still carries its publish date", () => {
+  // The fix touches the two corrections URLs only. Post entries are correct as
+  // they stand and the expiry rule deliberately keeps expired posts in here, so
+  // this pins both facts while the corrections dates are being recomputed.
+  const r = renderCorrections(`# Log
+
+Standing rule: a correction is appended and never deleted.
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'one correction')}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(lastmodFor(r.sitemap, '2026-10-02/belmont-county-three-day-weather-roundup/'), '2026-10-02');
 });

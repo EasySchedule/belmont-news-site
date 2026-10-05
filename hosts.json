@@ -1,0 +1,56 @@
+{
+  "$comment": [
+    "The deploy record's host table, in a form a program can check. README.md 'Hosting'",
+    "is the prose version of this file; when the two disagree this file is what runs.",
+    "",
+    "Every host here is asserted on CONTENT, never on a status code. A host that",
+    "answers 200 while serving Bolt's 'Website Not Found' page is how the record",
+    "came to call a dead host healthy, so a 200 is never evidence on its own.",
+    "",
+    "expect, per host:",
+    "  build-info  GET <url>/build-info.json, require JSON with a 40-hex contentHead and a",
+    "              non-empty siteTitle. requireCurrentStore additionally compares contentHead",
+    "              against the markdown store's main.",
+    "  html        GET <url>/, require every string in `markers` and none in `forbidden`.",
+    "  absent      GET <url>/, require that NONE of `markers` appear. For a host the record",
+    "              knows is dead. Keeps the trap named in machine-readable form instead of",
+    "              only in a commit message."
+  ],
+  "store": "EasySchedule/belmont-news-blogs",
+  "storeRef": "main",
+  "hosts": [
+    {
+      "id": "github-pages",
+      "url": "https://easyschedule.github.io/belmont-news-site",
+      "role": "publish-path",
+      "note": "The verified publish path and the only URL a reader is given. Must be current.",
+      "expect": "build-info",
+      "requireCurrentStore": true
+    },
+    {
+      "id": "netlify",
+      "url": "https://belmont-news.netlify.app",
+      "role": "secondary-copy",
+      "note": "Live and rebuilding, not the publish path. Staleness here is reported, not fatal, until BEL-199 decides whether the site is paused, removed, or kept in sync.",
+      "expect": "build-info",
+      "requireCurrentStore": false
+    },
+    {
+      "id": "bolt-app",
+      "url": "https://belmont-news.bolt.host",
+      "role": "app",
+      "note": "The interactive app: auth, comments, weather, admin. No markdown store, no sourcing gate, no feed.",
+      "expect": "html",
+      "markers": ["<title>Belmont County News WebApp</title>"],
+      "forbidden": ["Website Not Found"]
+    },
+    {
+      "id": "bolt-county-dead",
+      "url": "https://belmont-county-news-b68j.bolt.host",
+      "role": "retired",
+      "note": "Measured 2026-10-05: HTTP 200, 8478 bytes, body is Bolt's 'Website Not Found' page. Asserted dead on purpose so it cannot be re-recorded as healthy, and so a restored host is noticed instead of inherited.",
+      "expect": "absent",
+      "markers": ["<title>Belmont County News WebApp</title>", "Belmont News"]
+    }
+  ]
+}

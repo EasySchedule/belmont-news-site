@@ -1,14 +1,26 @@
 # Belmont News on Netlify. Free tier.
-# Build command and publish directory are the only two settings a deploy needs;
-# the rest are guardrails so a broken build never replaces a good site.
 #
-# `npm test` first is a guardrail, not a courtesy. gate.yml only runs on pull
+# GitHub Pages is the publish path and the URL the newsroom gives a reader. This
+# file exists because the Netlify site is still connected to this repository and
+# rebuilds on every push, so its build had to stop being wrong rather than stay
+# unused. See "Hosting" in README.md for the measured state of both hosts.
+#
+# The sync is the load-bearing part. pages.yml pulls the markdown store on the
+# GitHub runner and never commits the result back, so `content/` as committed is
+# frozen at whatever snapshot was last committed. A build that rendered the
+# committed directory served the 2026-10-02 edition indefinitely: 4 posts against
+# Pages' 10, `listing.fallback: true`, and a 404 for every 2026-10-05 URL. Syncing
+# first means a Netlify build cannot render a stale snapshot whatever is
+# committed, so an unwatched second host degrades into a redundant copy instead
+# of a wrong one.
+#
+# `npm test` is a guardrail, not a courtesy. gate.yml only runs on pull
 # requests, so without it a renderer that renders nothing a reader can see would
 # deploy to production with no red check anywhere in the run. A failed build
 # leaves the last good deploy live, which is the outcome we want.
 
 [build]
-  command = "npm test && npm run build"
+  command = "npm run sync -- --from-github EasySchedule/belmont-news-blogs@main && npm test && npm run build"
   publish = "dist"
 
 [build.environment]

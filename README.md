@@ -215,6 +215,84 @@ value fails at the pull request that introduced it as well as at deploy time.
 The field is declared in that repository's `schema.json`, which is what stops
 `additionalProperties: false` from rejecting a post that uses it.
 
+### Declared expiry
+
+The window is a question about the calendar: is this post still inside the last two
+news days? It cannot answer whether the story is still *true*. Those come apart
+constantly on a newsroom that covers events. The Wall That Heals exhibit was filed
+2026-10-03, shut Sunday 2026-10-04 at 14:00, and on Monday the 5th it was inside
+its own two-day window, still on the front page, still in the feed, still telling a
+reader it "closes tonight".
+
+So a post may say so itself:
+
+```yaml
+expired: 2026-10-04     # the story stopped being true on that newsroom day
+expired: true           # the story stopped being true, no single day to name
+```
+
+A day is preferred over a bare `true`, because "this closed at 14:00 on the 4th" is
+something a reader can be told and "this is old" is not. **Before** that day the
+post behaves exactly as before, so a story can be marked on the morning it publishes
+and go stale on its own — the moment a story decays, nobody is watching.
+
+Either value is refused if it is misspelled, for the same reason `expires` is: a
+flag that is silently ignored leaves the page reading as live and the source reading
+as expired, and nobody finds out until a reader is told an exhibit closes tonight
+three days after it shut. `expired` before the post's own `date` is refused as a
+typo.
+
+This is a second, independent reason to leave the listing and the feed — not a
+replacement for the window. Either one is enough. Note that `expired` is a statement
+about the story and the window is a statement about the calendar, so `build-info.json`
+now reports which one removed each post, as `reason`.
+
+### The notice a reader gets
+
+A post that is not current keeps its page, its sources, and its sitemap entry.
+Nothing is withdrawn: the permalink in every already-delivered feed `guid` has to
+keep resolving, and a reader who followed a link has to be told the difference
+between what the story said and what is true.
+
+Three surfaces say so, in three lengths: a dated notice on the post's own page, a
+dated flag on a front-page card, and an `archive` category on the feed item. The
+notice is more than a label. It names which day the page stopped being current,
+says whether that is a calendar fact or a truth claim, tells the reader to check
+the named sources before acting, and states that nothing on the page is a standing
+claim about today. That last sentence is the construction the weather roundup in the
+archive already uses correctly — "an empty alert response is a statement about the
+moment of retrieval, not a standing guarantee" — applied to dates and hours.
+
+### The body's shape
+
+The gate above checks front matter — title, date, byline, slug, sources — and never
+looked at the body. That is how a page shipped that rendered the Paperclip document
+API response instead of the story: HTTP 200, a valid `h1`, a valid byline, and the
+article trapped inside as an escaped string under a `body` key. Nothing signalled
+failure, and the gate that stops an unsourced or badly-bylined post said nothing,
+because it only ever read the front matter.
+
+The diagnosis is worth recording because it is not the obvious one: **nothing in this
+build reads a wrong field.** `parseFrontMatter` returns everything after the closing
+`---` and `postPage` renders it. There is no field selection in the pipeline, so
+there was no field to get wrong — the file itself contained the whole API response
+where markdown belonged.
+
+So the guard is on the input: a body that is a serialized data document **fails the
+build**, naming the file and telling the author to write the markdown that is the
+value of its `body` key. This is a refusal, not a redaction, which is the stronger
+answer — a `.body`-only fix would have left `companyId`, `issueId`,
+`latestRevisionId`, `createdByAgentId`, `lockedByAgentId` and `sourceTrust` in the
+served bytes, and governance fields have no business being public under any
+rendering rule.
+
+The test is that the **entire** body parses as one JSON object or array, which is why
+it cannot fire on a story that opens with a brace, on a story that opens with a
+bracket, or on a story quoting JSON inside a fenced code block. Bare JSON scalars are
+deliberately not refused: `"a pull quote"` is an ordinary paragraph opening, and a
+gate that refuses pull quotes gets deleted.
+
+
 ### The listing rolls on its own
 
 A listing that ages out on a calendar boundary needs a build on that boundary. The
@@ -248,6 +326,28 @@ warns on stderr, and `build-info.json` records `listing.fallback: true`. It does
 fail the deploy: refusing to publish because a listing would be empty is worse than
 showing a slightly older story, and the gate already refuses to publish a site with
 no posts at all. Every post page and every sitemap entry is unaffected either way.
+
+What was missing is that the fallback published those posts with **no signal at
+all**, under a navigation link reading *Latest*. They are, by construction, all out
+of window, so they were the least-marked pages on the site — and the one a reader
+lands on first was the one serving false present tense with nothing above it. Three
+separate audits found that instance independently, and none of them could have been
+fixed by marking the three posts that were already off the listing.
+
+So the fallback now carries the same dated notice the expired path does: every card
+is flagged with its publication day, and the page says once, at the top, that
+nothing filed fell inside the window and that what follows is archive. The fallback
+may overrule the window, because an old post that may still be true is a better
+front page than a blank one *provided the page says so*. It may **not** overrule a
+declared `expired`: resurrecting a post the desk has said is no longer true, because
+it is merely recent, would publish the defect by the very mechanism built to remove
+it. If every post has expired, the front page says it is empty and the archive still
+publishes in full.
+
+`windowDays: 2` is a policy value, not a rendering bug. On a newsroom that publishes
+hourly it makes the front page's *Latest* at least two days stale by design. It is
+already a per-build flag (`--listing-days`), so it is the board's call rather than a
+default nobody has looked at.
 
 ## The gate
 
@@ -308,12 +408,15 @@ front page and still report green every fifteen minutes.
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
 | `scripts/check-listing-stale.mjs` | Answers "was the front page built for an earlier newsroom day?" and exits 0/1/2. |
+| `scripts/check-hosts.mjs` | Answers "does each host in the record serve our content, not merely answer 200?" and exits 0/1/2. |
+| `hosts.json` | The deploy record's host table, machine-readable. The check reads this, not the README. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
 | `test/build.test.mjs` | The DST and no-future-`pubDate` rules, and the log parser. |
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
 | `test/expiry.test.mjs` | The listing window, and the four surfaces it does and does not touch. |
 | `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
 | `test/listing-stale.test.mjs` | The listing-staleness check, and its refusal cases. |
+| `test/host-content.test.mjs` | The host-content check: a 200 serving the wrong bytes must fail, and stay distinct from unreachable. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
 | `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over. |
@@ -341,9 +444,11 @@ Check `/build-info.json` on the deployed site to see whether analytics is on.
 
 **The live host is GitHub Pages**, at
 <https://easyschedule.github.io/belmont-news-site>. That is the URL the
-newsroom verifies. Netlify is configured in `netlify.toml` and builds the same
-`dist/` from the same command, but it is not deployed and its host returns 404,
-so nothing in the publish path depends on it. See "Hosting" below.
+newsroom verifies, and the only one the newsroom publishes. Netlify is also
+live at `https://belmont-news.netlify.app` and rebuilds on every push to `main`,
+so a second copy of this site is being served from there right now. It cannot be
+current unless its build syncs the store, which it now does, but it is still not
+the publish path and not the URL to give a reader. See "Hosting" below.
 
 Push to `main` and `pages.yml` publishes. That workflow is the only thing in
 this repository that builds or deploys; every other route into publishing ends
@@ -371,6 +476,23 @@ git ls-remote https://github.com/EasySchedule/belmont-news-blogs.git refs/heads/
 ```
 
 Those two agree when the site is current.
+
+**Fifteen minutes is the schedule, not the observed delay.** GitHub queues scheduled
+workflows and this repository's `*/15` cron has been running hours late: six runs on
+2026-10-04 and three on 2026-10-05, against the 96 a day the cron asks for. The
+schedule also used to fail outright at its last step -- the dispatch job has no
+checkout, so `gh workflow run pages.yml --ref main` had no repository to resolve
+and died on `fatal: not a git repository`, twelve runs in a row from 2026-10-03.
+`--repo "$GITHUB_REPOSITORY"` fixed that in #14.
+
+Neither failure is visible from the newsroom's side: a store merge can sit
+unpublished for hours with the site answering 200 the whole time. So when an
+edition has to be up now, dispatch it rather than waiting:
+
+```
+gh workflow run publish-on-blogs-update.yml --ref main   # decides, then dispatches pages.yml
+gh workflow run pages.yml --ref main                     # publishes unconditionally
+```
 
 The same check runs by hand, which is what to use when a merge has just landed
 and the wait is too long:
@@ -415,16 +537,77 @@ node scripts/check-listing-stale.mjs    # 0 current, 1 stale, 2 could not tell
 
 ### Hosting
 
-Two hosts are configured and only one is live.
+Two hosts are configured. **One is the publish path. The other is live and is not it.**
 
 | Host | State | URL |
 |---|---|---|
-| GitHub Pages | **Live. The verified publish path.** | `https://easyschedule.github.io/belmont-news-site` |
-| Netlify | Configured in `netlify.toml`, not deployed, returns 404 | `https://belmont-news.netlify.app` |
+| GitHub Pages | **Live. The only verified publish path. Give a reader this one.** | `https://easyschedule.github.io/belmont-news-site` |
+| Netlify | Live, rebuilds on every push, and was behind by construction. Not the publish path. | `https://belmont-news.netlify.app` |
 
-Both run `npm run build` and publish `dist/`, so they render identical HTML.
-Until Netlify is deployed and its URL is verified, GitHub Pages is production
-and `pages.yml` is the publish path. Do not describe a Netlify deploy as done.
+Checked 2026-10-05, from the two hosts' own `/build-info.json`:
+
+| | Pages | Netlify |
+|---|---|---|
+| Store commit rendered | `78cd169e`, current | `bc766e21`, the 2026-10-02 snapshot |
+| Posts | 10 | 4 |
+| Listed on the front page | 5 | 2 |
+| `listing.fallback` | `false` | `true` |
+| Content synced at | build time, from the store | 2026-10-02, from the committed `content/` |
+
+The Netlify host is bound to this repository: it serves the `[[headers]]` and the
+`/rss` redirect from `netlify.toml`, which Pages serves neither of. And it is not
+a stale deploy nobody has touched -- its `build-info.json` is stamped within a
+second of the Pages deploy on the same push.
+
+**Why it was behind, and what stops it.** `netlify.toml` built `npm test && npm run build`, which
+renders the `content/` directory **as committed in this repository**. `pages.yml` syncs the
+markdown store on the GitHub runner and never commits the synced tree back, so that directory was
+frozen at the 2026-10-02 sync however many blogs were merged since. The build command now syncs
+the store first, the same way `pages.yml` does, so a Netlify build cannot render a stale snapshot
+whatever happens to be committed. Netlify still sets no `SOURCE_DATE_EPOCH`, so its feed
+timestamps follow the wall clock and its bytes will differ from Pages'; that is one more reason it
+is not the host to publish.
+
+**Until the Netlify site itself is paused or removed, treat it as a second, unwatched copy.** On
+2026-10-05 it 404ed every 2026-10-05 edition URL that Pages served. Its own `rel=canonical`
+points at Pages, which is the only thing telling a reader and a crawler which copy is the
+newsroom's. Do not describe a Netlify deploy as done, and do not give its URL to a reader.
+
+Neither host can be settled from this repository alone: pausing or removing the Netlify site needs
+a Netlify credential. Until one exists, the repo-side fix above is the whole of what is available.
 
 A failing gate stops both, because the gate runs before the upload step.
+
+### Does each host actually serve us? (`scripts/check-hosts.mjs`)
+
+**A status code is not evidence that a host is alive.** `belmont-county-news-b68j.bolt.host`
+answers **HTTP 200** with an 8478-byte body that is Bolt's "Website Not Found" page. A checker
+that asks only "did it answer?" reports a dead host as healthy, which is the most likely mechanism
+behind this section having been wrong: the record asserted hosts were fine because they answered,
+and nothing ever checked what they served. That mistake was reported outward twice on 2026-10-05 —
+once as a site-wide outage that was really one dead host, once as the site being down when it was
+published on a second host.
+
+`hosts.json` is the table above in a form a program can check, and `scripts/check-hosts.mjs` reads
+it. Every host is asserted on content, never on a status code:
+
+| Host | Asserted on |
+|---|---|
+| `github-pages` | `/build-info.json` parses, `contentHead` is 40 hex, and it equals the store's `main` |
+| `netlify` | the same marker, but staleness is reported rather than failed — it is not the publish path |
+| `bolt-app` | HTML containing `<title>Belmont County News WebApp</title>`, and **not** "Website Not Found" |
+| `bolt-county-dead` | asserted **dead**: if it ever serves our markers again, the check fails |
+
+```
+node scripts/check-hosts.mjs         # 0 all hosts served us, 1 a host served the wrong thing, 2 could not tell
+```
+
+Exit 1 and exit 2 are separate on purpose. A host answering 200 with the wrong body is a durable
+fact about that host; an unreachable host is a fact about this run. Merging them is how a network
+blip gets recorded as "fine" and a real outage gets retried until it looks like flakiness. Every
+failure line names the host and the marker, so the log says which thing broke.
+
+All reads are anonymous, so this needs no token and no credential. Run it by hand after any deploy,
+or any time someone is about to describe a host's health in prose. `test/host-content.test.mjs`
+covers it, including a test that fails if the record ever grows a `expectedStatus`-style field.
 

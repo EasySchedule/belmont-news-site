@@ -31,6 +31,36 @@
 // edition by the time the 06:00 reader arrived.
 //
 // Zero dependencies, like everything else in this build.
+//
+// One more rule lives here, and it is a different kind of rule from the window
+// above. BEL-161:
+//
+//   A post can stop being TRUE long before it stops being RECENT.
+//
+// The window above answers "is this post inside the last two news days?", which
+// is a question about the calendar. It cannot answer "is this story still
+// current?", which is a question about the story. The Wall That Heals exhibit
+// closed Sunday 4 October at 14:00, so on Monday the 5th that post was inside
+// its own two-day window, still on the front page, still in the feed, and
+// telling a reader it "closes tonight". The window could not have caught it: by
+// the rule's own definition the post was three days old and therefore current.
+// Grace's audit found the same false tense on two more posts.
+//
+// So a post may now say so itself, in front matter, with `expired`:
+//
+//   expired: 2026-10-04     the story stopped being true on that newsroom day
+//   expired: true           the story stopped being true, no single day to name
+//
+// A day rather than a bare true is preferred, because "this exhibit closed at
+// 14:00 on the 4th" is something a reader can be told and "this is old" is not.
+// Before that day the post behaves exactly as it does now, so a story can be
+// marked in advance on the morning it publishes and go stale on its own.
+//
+// This is a second reason for a post to leave the listing and the feed, and the
+// only reason the post's OWN page changes: an expired post gets a visible notice
+// saying its text is the record as published and no longer current. The page is
+// never withdrawn. The archive is the record, and a reader who followed a link
+// has to be told the difference between what the story said and what is true.
 
 import { addDays, isRealDay } from './dates.mjs';
 
@@ -61,6 +91,71 @@ export function isCalendarDay(v) {
 // would drop off the front page on a different day than its own address says.
 export function publicationDay(fm) {
   return String(fm?.date ?? '').trim().slice(0, 10);
+}
+
+// ---------------------------------------------------- declared expiry
+//
+// `expired` is read the same tolerant way as `expires`, and it is optional in
+// the same way: absent, empty, or `false` all mean "this post makes no claim
+// about its own currency", which is every post that has not been through the
+// question yet.
+//
+// `true` is accepted as well as a day, because a desk that knows a story has
+// gone stale should be able to say so without inventing a day it does not have.
+export function declaredExpiryField(fm) {
+  const raw = fm?.expired;
+  if (raw === undefined || raw === null || String(raw).trim() === '' || raw === false) return null;
+  return String(raw).trim();
+}
+
+// Validate the optional `expired` override. Returns an error string, or null.
+//
+// Held to the same standard as `expires` on purpose. A flag that is silently
+// ignored when misspelled is worse than no flag at all, because the post reads
+// as live on the page and as expired in the source, and nobody notices until a
+// reader is told an exhibit closes tonight three days after it shut. So:
+// anything that is neither `true` nor a real calendar day stops the build.
+export function expiredError(fm, file) {
+  const value = declaredExpiryField(fm);
+  if (value === null) return null;
+  if (value === 'true') return null;
+  if (!isCalendarDay(value)) {
+    return `${file}: expired must be true or a real calendar day as YYYY-MM-DD, got ${JSON.stringify(fm.expired)}. `
+      + 'Use a day when the story has a known expiry, and true when it does not. '
+      + 'A misspelled flag is ignored downstream, which is how a stale story keeps being served as current.';
+  }
+  const day = publicationDay(fm);
+  if (!isRealDay(day)) {
+    return `${file}: date must begin with a real YYYY-MM-DD day for expired to be checked against`;
+  }
+  if (value < day) {
+    return `${file}: expired ${value} is before the post's own date ${day}. `
+      + 'A story cannot have expired before it was filed; that is a typo, and honouring it would drop a new post off the front page on its first day.';
+  }
+  return null;
+}
+
+// Has the post declared itself expired, as of this newsroom day?
+//
+//   expired        true once the day has arrived, false before it
+//   declaredDay    the day named, or null for a bare `expired: true`
+//   from           'front-matter' when declared, so build-info and --check can
+//                  report a post leaving the listing for a stated reason rather
+//                  than for the default window
+//
+// Before the named day this returns false and the post is live. That is the
+// point of allowing a day instead of only `true`: the flag has to be writable on
+// publication day, because the moment a story goes stale nobody is watching.
+export function declaredExpired(fm, { today } = {}) {
+  const value = declaredExpiryField(fm);
+  if (value === null) return { expired: false, declaredDay: null, from: null };
+  if (value === 'true') return { expired: true, declaredDay: null, from: 'front-matter' };
+  const day = value;
+  // An unvalidated field must not decide anything. expiryError/expiredError have
+  // already stopped the build by the time a real build reaches here; this keeps
+  // the function total for the tests and for --check on a bad file.
+  if (!isCalendarDay(day)) return { expired: false, declaredDay: null, from: 'front-matter' };
+  return { expired: String(today) >= day, declaredDay: day, from: 'front-matter' };
 }
 
 // Validate the optional `expires` override. Returns an error string, or null.
@@ -98,8 +193,30 @@ export function listingExpiry(fm, { today, days = DEFAULT_LISTING_DAYS } = {}) {
   const expires = override || addDays(publicationDay(fm), days);
   // On its expiry day the post is already out. A boundary of "after" would keep
   // it listed for one extra full day and make the window days+1 long by accident.
-  const listed = today < expires;
-  return { listed, expires, from: override ? 'front-matter' : 'default-window' };
+  const withinWindow = today < expires;
+  // Two independent reasons to leave the listing, and they are not the same
+  // reason. The window is about the calendar: this post is not news any more.
+  // A declared `expired` is about the story: this post is no longer TRUE, and
+  // the window would still consider it current. Either one is enough.
+  const declared = declaredExpired(fm, { today });
+  return {
+    listed: withinWindow && !declared.expired,
+    expires,
+    from: override ? 'front-matter' : 'default-window',
+    // `reason` is the single field a reader of build-info.json or --check needs:
+    // why is this post not on the front page. Stated once here so the three
+    // surfaces that report on the listing cannot drift apart.
+    //
+    // A post can be out of window AND have declared itself expired, and when both
+    // are true `declared-expired` is the answer worth printing. The window would
+    // have caught it anyway; the declaration is the fact that the window did not
+    // need. Reporting `out-of-window` there would understate what the desk knows.
+    reason: declared.expired
+      ? 'declared-expired'
+      : (!withinWindow ? (override ? 'window-override' : 'out-of-window') : null),
+    declaredExpired: declared.expired,
+    declaredDay: declared.declaredDay,
+  };
 }
 
 // Split a post set into the posts that are listed and the posts that are not,
