@@ -506,6 +506,9 @@ function renderCorrections(log) {
         stdout,
         stderr: '',
         html: readFileSync(join(root, 'dist', 'corrections', '2026-10', 'index.html'), 'utf8'),
+        // The index and the month page are written by this same build, so the
+        // index is read here rather than by a second build with the same fixture.
+        indexHtml: readFileSync(join(root, 'dist', 'corrections', 'index.html'), 'utf8'),
         // The sitemap is written by this same build and carries the lastmod the
         // tests below are about, so it is read here rather than by a second
         // build with the same fixture.
@@ -715,4 +718,198 @@ Standing rule: a correction is appended and never deleted.
 ${correctionEntryFixture('2026-10-02', '2026-10-03', 'one correction')}`);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(lastmodFor(r.sitemap, '2026-10-02/belmont-county-three-day-weather-roundup/'), '2026-10-02');
+});
+
+// -------------------------------------------------- data tables
+//
+// The defect: on 2026-10-05 every <th> on the site was a bare <th>. A
+// screen-reader user got six unlabelled numbers per weather row with no way to
+// recover which was the high and which the low, and neither table carried a
+// <caption>. WCAG 1.3.1.
+
+const TABLE_BODY = [
+  '## Three-day table',
+  '',
+  'Point of record: St. Clairsville, Ohio.',
+  '',
+  '| Date | High | Low | Sky condition |',
+  '| --- | --- | --- | --- |',
+  '| Sat Oct 3, 2026 | 69 °F | 53 °F | Sunny |',
+  '| Sun Oct 4, 2026 | 73 °F | 50 °F | Partly sunny |',
+  '',
+].join('\n');
+
+test('every header cell names its column', () => {
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', TABLE_BODY);
+  assert.equal(r.code, 0, r.stderr);
+  const cells = [...r.html.matchAll(/<th\b[^>]*>/g)].map((m) => m[0]);
+  assert.equal(cells.length, 4, 'all four header cells render');
+  for (const cell of cells) {
+    assert.match(cell, /scope="col"/, `header cell carries its column scope: ${cell}`);
+  }
+  // The one header row is the whole association. An id/headers pair per cell
+  // would be the same information spelled out once per column.
+  assert.doesNotMatch(r.html, /headers=/, 'no id/headers pairing is invented for a single header row');
+});
+
+test('a table an author captioned renders that caption, and it is visible', () => {
+  const body = TABLE_BODY.replace(
+    '| Date |',
+    'Table: Belmont County three-day forecast, Saturday October 3 through Monday October 5, 2026. Source: National Weather Service gridpoint forecast PBZ/50,48, retrieved 2026-10-02.\n\n| Date |',
+  );
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', body);
+  assert.equal(r.code, 0, r.stderr);
+  const caption = /<caption>([\s\S]*?)<\/caption>/.exec(r.html);
+  assert.ok(caption, 'the table is captioned');
+  assert.match(caption[1], /National Weather Service gridpoint forecast PBZ\/50,48/, 'the caption says where the numbers came from');
+  assert.doesNotMatch(caption[0], /class="visually-hidden"/, 'an author-written caption is on the page, not hidden from it');
+});
+
+test('a caption survives a blank line between it and the table', () => {
+  const body = TABLE_BODY.replace(
+    '| Date |',
+    'Table: The forecast, from the National Weather Service.\n\n| Date |',
+  );
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<caption>The forecast, from the National Weather Service\.<\/caption>/);
+  assert.doesNotMatch(r.html, /<p>Table: /, 'the caption line does not also print as a paragraph');
+});
+
+test('a table with no caption written still gets one, carried for a screen reader', () => {
+  // This is the half that scales. No post has to opt in, so a queued story
+  // carrying a table cannot reintroduce the defect.
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', TABLE_BODY);
+  assert.equal(r.code, 0, r.stderr);
+  const caption = /<caption[^>]*>([\s\S]*?)<\/caption>/.exec(r.html);
+  assert.ok(caption, 'an unwritten caption does not mean no caption');
+  assert.match(caption[0], /class="visually-hidden"/, 'a derived caption is not printed twice on the page');
+  assert.equal(caption[1].trim(), 'Three-day table', 'it is taken from the heading above the table');
+});
+
+test('a derived caption carries the heading words but no link a keyboard user can land on', () => {
+  // The heading is already on the page, so its link is reachable there. A second
+  // copy inside off-screen text is a tab stop with no visible focus target.
+  const body = [
+    '## See the [forecast notice](/sources/) before you read on',
+    '',
+    '| Date | High |',
+    '| --- | --- |',
+    '| Sat Oct 3, 2026 | 69 °F |',
+    '',
+  ].join('\n');
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', body);
+  assert.equal(r.code, 0, r.stderr);
+  const caption = /<caption[^>]*>([\s\S]*?)<\/caption>/.exec(r.html);
+  assert.ok(caption, 'the table is captioned');
+  assert.equal(caption[1].trim(), 'See the forecast notice before you read on', 'the readable words survive');
+  assert.doesNotMatch(caption[1], /<a\b/, 'the off-screen caption carries no interactive markup');
+  // The heading itself keeps its link. Only the hidden copy drops it.
+  assert.match(r.html, /<a href="\/sources\/">forecast notice<\/a>/, 'the printed heading is untouched');
+});
+
+test('a Table: line that is not above a table stays ordinary prose', () => {
+  const body = `${TABLE_BODY}\n## Later\n\nTable: this one names no table at all.\n`;
+  const r = render(FRONT + `\n${SOURCES}`, 'belmont-county-three-day-weather-roundup', body);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.html, /<p>Table: this one names no table at all\.<\/p>/);
+  assert.equal([...r.html.matchAll(/<caption/g)].length, 1, 'the one table on the page is still captioned');
+});
+
+// -------------------------------------------------- corrections: anchors
+
+const headTexts = (html) => [...html.matchAll(/<h2>([\s\S]*?)<\/h2>/g)].map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+test('every correction carries an id, so one correction can be linked to', () => {
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'the address was wrong')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const ids = [...r.html.matchAll(/<article class="correction" id="([^"]+)">/g)].map((m) => m[1]);
+  assert.equal(ids.length, 2);
+  assert.equal(new Set(ids).size, 2, 'ids are unique');
+  for (const id of ids) {
+    assert.match(r.html, new RegExp(`href="#${id}"`), `the permalink points at ${id}`);
+  }
+});
+
+test('two corrections to one post on one day do not collide on an id', () => {
+  // Both entries share post date, correction date and slug, which is the only
+  // combination the id can collide on.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the first claim was wrong')}
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the second claim was wrong')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const ids = [...r.html.matchAll(/<article class="correction" id="([^"]+)">/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, 2, 'the second entry steps past the first id');
+});
+
+test('two corrections on one post on different dates do not collide on an id', () => {
+  // The date of the correction is part of the id, so a post corrected twice in
+  // one month does not give both entries the same anchor.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong')}
+${correctionEntryFixture('2026-10-02', '2026-10-05', 'the low was wrong')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const ids = [...r.html.matchAll(/<article class="correction" id="([^"]+)">/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, 2, 'each correction date gets its own anchor');
+});
+
+test('a heading list of corrections tells them apart', () => {
+  // The defect in its original form: six h2s, three of them the same string.
+  // The desk's own separator is "what was wrong / what is right", so the half
+  // before it is the claim that identifies the entry.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong / the right figure was 70')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'the address was wrong / it is 45420 Roscoe Road')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const heads = headTexts(r.html);
+  assert.equal(heads.length, 2);
+  assert.equal(new Set(heads).size, 2, 'no two corrections share a heading');
+  assert.match(heads[0], /the high was wrong/, 'the heading carries the claim being corrected');
+  assert.doesNotMatch(heads[0], /the right figure was 70/, 'the heading stops at the separator');
+  // The heading identifies the entry. It does not replace it.
+  assert.match(correctionTexts(r.html)[0], /the high was wrong \/ the right figure was 70/, 'the full text still prints in full underneath');
+});
+
+test('two corrections whose claims start the same way still get different headings', () => {
+  // The fixture case the uniqueness assertion above misses: same post, same
+  // correction date, claims that begin with the same words.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong / the right figure was 70')}
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong / the right figure was 71')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const heads = headTexts(r.html);
+  assert.equal(new Set(heads).size, 2, 'a repeated claim lead is numbered rather than left identical');
+});
+
+test('each correction permalink has an accessible name of its own', () => {
+  // Every link on the page used to be announced as "Permalink to this
+  // correction", so a screen reader's link list was the same words six times.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'the address was wrong')}`);
+  assert.equal(r.code, 0, r.stderr);
+  const names = [...r.html.matchAll(/<a class="permalink" href="#[^"]+" aria-label="([^"]+)">/g)].map((m) => m[1]);
+  assert.equal(names.length, 2);
+  assert.equal(new Set(names).size, 2, 'the names are distinct');
+  assert.match(names[0], /2026-10-03/, 'a name says which correction it points at');
+});
+
+test('the corrections index counts corrections without claiming attribution', () => {
+  // `.byline` is the only class in the stylesheet that means who wrote a thing,
+  // and the corrections log is the one page whose subject is attribution.
+  const r = renderCorrections(`# Log
+
+${correctionEntryFixture('2026-10-02', '2026-10-03', 'the high was wrong')}
+${correctionEntryFixture('2026-10-03', '2026-10-04', 'the address was wrong')}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.indexHtml, /<p class="card-note">2 corrections on record<\/p>/);
+  assert.doesNotMatch(r.indexHtml, /class="byline"/, 'a count is not rendered as an attribution');
 });
