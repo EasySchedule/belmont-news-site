@@ -408,6 +408,7 @@ front page and still report green every fifteen minutes.
 | `scripts/sync-content.mjs` | Copies or clones the blogs repository into `content/` and `corrections/`. |
 | `scripts/check-blogs-ahead.mjs` | Answers "is the published site behind the markdown store?" and exits 0/1/2. |
 | `scripts/check-listing-stale.mjs` | Answers "was the front page built for an earlier newsroom day?" and exits 0/1/2. |
+| `scripts/publish-now.mjs` | Dispatches `pages.yml` and then confirms a run of it exists. Exits 0/1/2. |
 | `scripts/check-hosts.mjs` | Answers "does each host in the record serve our content, not merely answer 200?" and exits 0/1/2. |
 | `hosts.json` | The deploy record's host table, machine-readable. The check reads this, not the README. |
 | `scripts/serve.mjs` | Local static server for checking. Not for production. |
@@ -415,11 +416,12 @@ front page and still report green every fifteen minutes.
 | `test/render.test.mjs` | Builds fixtures and reads the HTML that comes out. |
 | `test/expiry.test.mjs` | The listing window, and the four surfaces it does and does not touch. |
 | `test/publish-drift.test.mjs` | The drift check, including the cases where it must refuse to answer. |
+| `test/publish-dispatch.test.mjs` | That a decided publish becomes a deploy, and that a failed one cannot read as success. |
 | `test/listing-stale.test.mjs` | The listing-staleness check, and its refusal cases. |
 | `test/host-content.test.mjs` | The host-content check: a 200 serving the wrong bytes must fail, and stay distinct from unreachable. |
 | `netlify.toml` | Netlify free-tier build config and security headers. |
 | `.github/workflows/pages.yml` | GitHub Pages publish. The only thing that builds or deploys. |
-| `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over. |
+| `.github/workflows/publish-on-blogs-update.yml` | Scheduled checks. Dispatches `pages.yml` when the store moves or the listing day turns over, and confirms a deploy run exists. |
 | `.github/workflows/gate.yml` | The same check on every pull request. |
 
 ## URLs
@@ -467,6 +469,14 @@ every 15 minutes:
 3. If they differ, it dispatches `pages.yml`, which rebuilds and redeploys. If
    they match, it does nothing and no deploy is spent.
 
+The dispatch is not finished when the request is sent. The Actions API answers a
+dispatch with `204` and no body, which means accepted for processing and not "will
+run", so `scripts/publish-now.mjs` then waits for a `pages.yml` run to actually
+appear, retries once if none does, and exits non-zero if none ever does. A
+decided publish is now a deploy that exists or a red run that says so. It also
+puts the run's URL in the summary, so the run page names the deploy it produced
+rather than reporting an intention.
+
 So a correct merge to the store publishes within about fifteen minutes without
 anyone remembering to. Check it at any time:
 
@@ -483,7 +493,11 @@ workflows and this repository's `*/15` cron has been running hours late: six run
 schedule also used to fail outright at its last step -- the dispatch job has no
 checkout, so `gh workflow run pages.yml --ref main` had no repository to resolve
 and died on `fatal: not a git repository`, twelve runs in a row from 2026-10-03.
-`--repo "$GITHUB_REPOSITORY"` fixed that in #14.
+`--repo "$GITHUB_REPOSITORY"` fixed that in #14. That fix removed the one error the
+step could report; it could not report an error of its own, because a dispatch that
+is accepted and then produces no run is indistinguishable from one that worked. The
+dispatch step now waits for the run and fails when it never arrives, and the run
+summary reads the dispatch job's result instead of the probes' intent.
 
 Neither failure is visible from the newsroom's side: a store merge can sit
 unpublished for hours with the site answering 200 the whole time. So when an
@@ -501,6 +515,17 @@ and the wait is too long:
 node scripts/check-blogs-ahead.mjs        # 0 current, 1 behind, 2 could not tell
 gh workflow run pages.yml --ref main
 ```
+
+`publish-now.mjs` is the dispatch the schedule uses, and it is safe to run by hand
+when an edition has to be up now. It needs `GITHUB_TOKEN` and `PUBLISH_REPO`; on a
+checkout of this repository that is:
+
+```
+GITHUB_TOKEN=$(gh auth token) PUBLISH_REPO=EasySchedule/belmont-news-site \
+  node scripts/publish-now.mjs
+```
+
+It prints the deploy's URL on stdout and exits 0 only once that run exists.
 
 Exit code 2 means the question could not be answered: the store was unreachable,
 or the live site was not serving, or the live site predates the `contentHead`

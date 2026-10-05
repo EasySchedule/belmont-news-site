@@ -14,6 +14,18 @@
 # pages.yml to run, and the renderer tests and the sourcing gate still run
 # inside pages.yml exactly as before.
 #
+# Deciding to publish and publishing are two facts, and this file used to assert
+# only the first. `gh workflow run` was the whole evidence that a deploy would
+# follow, and it can exit 0 having achieved nothing: the dispatch endpoint
+# answers 204 with no body, which means accepted for processing, not "will run".
+# On top of that the run summary printed "Dispatched pages.yml." from the probes'
+# *intent*, in a job that did not depend on the dispatch, so it reported success
+# on every run where the dispatch had died. Thirteen of twenty-two runs failed at
+# this step over two days and nothing in the newsroom was red. The step now waits
+# for a pages.yml run to exist, retries, and fails when one never appears, and the
+# summary reports the dispatch job's outcome instead of the probes' intention.
+# See scripts/publish-now.mjs and test/publish-dispatch.test.mjs.
+#
 # Why a schedule and not repository_dispatch. BEL-18 section 7.3 asks for a
 # cross-repository trigger, and this is the same idea, but the two mechanisms
 # that implement it need something this newsroom does not have:
@@ -149,6 +161,8 @@ jobs:
   dispatch:
     name: Publish
     needs: [drift, listing]
+    outputs:
+      url: ${{ steps.publish.outputs.url }}
     # `always()` so one loud failure does not silently cancel the other reason to
     # publish. A red drift check still has to let a stale listing be republished,
     # or a probe that cannot reach the store would quietly freeze the front page
@@ -156,39 +170,71 @@ jobs:
     if: always() && (needs.drift.result == 'success' || needs.listing.result == 'success')
     runs-on: ubuntu-latest
     steps:
-      # pages.yml is the only thing that builds or deploys. This dispatch is
-      # the same `gh workflow run pages.yml --ref main` the newsroom ran by
-      # hand for the Wall That Heals story, which is the point: the manual step
-      # becomes the scheduled step, unchanged, so there is still exactly one
+      # The checkout is here to get scripts/publish-now.mjs, and nothing else.
+      # It is not there for `gh` to read a remote, which is the trap: this job
+      # used to run no checkout at all on purpose, and `gh workflow run` without
+      # --repo resolves the target from the git remote of the working directory,
+      # so thirteen runs in a row died on "fatal: not a git repository" in this
+      # last step, after both checks had already decided to publish.
+      #
+      # publish-now.mjs cannot repeat that. It never asks git anything: the
+      # repository is an explicit owner/name and the API base is an explicit URL.
+      # No working directory, no remote and no git binary can change its result.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # pages.yml is still the only thing that builds or deploys. This dispatches
+      # the same workflow the newsroom ran by hand, so there is still exactly one
       # publish path and nothing to document twice.
       #
       # Both checks run here rather than in their own jobs so that a day that is
       # both behind on content and a day old in the listing still spends one
       # deploy.
+      #
+      # The step does not end at "the request was accepted". The dispatch endpoint
+      # answers 204 with no body, which means accepted for processing and not
+      # "will run", so an accepted request that produces no run is the silent
+      # non-publish this whole workflow exists to prevent. publish-now.mjs waits
+      # for a pages.yml run to actually appear, retries if none does, and exits
+      # non-zero if it never appears. A decided publish is now a fact or a red
+      # run, and never a quiet success.
       - name: Dispatch the publish
+        id: publish
         if: needs.drift.outputs.publish == 'true' || needs.listing.outputs.publish == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          # The repository's own token, scoped to this repository by the platform.
+          # actions: write is what permits both the dispatch and the listing of
+          # runs that confirms it, and write already includes read on the same
+          # scope. Not a stored secret, so nothing to rotate and nothing to leak.
+          GITHUB_TOKEN: ${{ github.token }}
+          # Named explicitly rather than left to GITHUB_REPOSITORY, because the
+          # whole defect class here is a publish aimed at the wrong place or at
+          # nothing. It should be visible in the file that sends it.
+          PUBLISH_REPO: ${{ github.repository }}
+          WORKFLOW: pages.yml
+          REF: main
           DRIFT: ${{ needs.drift.outputs.publish }}
           LISTING: ${{ needs.listing.outputs.publish }}
         run: |
           echo "drift=${DRIFT} listing=${LISTING}"
-          # --repo is required, not decorative. This job has no checkout, on
-          # purpose: dispatching a workflow needs no source and no credentials.
-          # But `gh` resolves the target repository from the git remote of the
-          # working directory when --repo is absent, and with no checkout there
-          # is no remote to read. Without the flag every run that had a reason
-          # to publish died here on "fatal: not a git repository", after both
-          # checks had already decided to publish. That is the silent
-          # non-publish this whole workflow exists to prevent, reproducing in
-          # the last step: the store moves, both probes go red-to-publish, the
-          # deploy never happens, and the reader keeps the old edition.
-          gh workflow run pages.yml --ref main --repo "$GITHUB_REPOSITORY"
-          echo "dispatched pages.yml"
+          # stdout is the run URL and nothing else, so this captures cleanly.
+          # bash runs with -e, so a non-zero exit here fails the step.
+          url="$(node scripts/publish-now.mjs)"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
 
   report:
     name: Report
-    needs: [drift, listing]
+    needs: [drift, listing, dispatch]
+    # `dispatch` being in `needs` is the fix, not a detail. It was not here
+    # before, so this job could not see whether the publish happened and printed
+    # "Dispatched pages.yml." from the *intent* output alone: on every one of the
+    # thirteen runs where the dispatch died, this summary said the site had been
+    # published, because both probes had said publish=true and the job never
+    # learned otherwise. A summary that reports what was intended is worse than
+    # no summary, since it is the thing a reader of the run page trusts.
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -212,7 +258,16 @@ jobs:
               echo "- **Could not determine whether the listing is current.** listing exit \`${{ needs.listing.outputs.exit }}\`. This run is red on purpose; see the step log."
             fi
             echo
-            if [ "${{ needs.drift.outputs.publish }}" == "true" ] || [ "${{ needs.listing.outputs.publish }}" == "true" ]; then
-              echo "Dispatched \`pages.yml\`."
+            # Read the outcome, not the intention. skipped means neither check
+            # wanted a publish and the step never ran; success means a pages.yml
+            # run was confirmed to exist; anything else means the site was NOT
+            # published and the newsroom should know that in the first line they
+            # read rather than three lines down.
+            if [ "${{ needs.dispatch.result }}" == "success" ]; then
+              echo "Dispatched \`pages.yml\`: ${{ needs.dispatch.outputs.url }}"
+            elif [ "${{ needs.dispatch.result }}" == "skipped" ]; then
+              echo "Nothing to publish. The site already renders the current store head and today's listing."
+            else
+              echo "- **The publish was decided and did not happen.** \`Dispatch the publish\` returned \`${{ needs.dispatch.result }}\`. The site is NOT published and readers are on an old edition. The step log carries what the API returned on each attempt."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
