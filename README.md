@@ -501,31 +501,39 @@ summary reads the dispatch job's result instead of the probes' intent.
 
 Neither failure is visible from the newsroom's side: a store merge can sit
 unpublished for hours with the site answering 200 the whole time. So when an
-edition has to be up now, dispatch it rather than waiting:
-
-```
-gh workflow run publish-on-blogs-update.yml --ref main   # decides, then dispatches pages.yml
-gh workflow run pages.yml --ref main                     # publishes unconditionally
-```
-
-The same check runs by hand, which is what to use when a merge has just landed
-and the wait is too long:
+edition has to be up now, publish it rather than waiting, and use the command
+that tells you whether it worked:
 
 ```
 node scripts/check-blogs-ahead.mjs        # 0 current, 1 behind, 2 could not tell
-gh workflow run pages.yml --ref main
-```
-
-`publish-now.mjs` is the dispatch the schedule uses, and it is safe to run by hand
-when an edition has to be up now. It needs `GITHUB_TOKEN` and `PUBLISH_REPO`; on a
-checkout of this repository that is:
-
-```
 GITHUB_TOKEN=$(gh auth token) PUBLISH_REPO=EasySchedule/belmont-news-site \
-  node scripts/publish-now.mjs
+  node scripts/publish-now.mjs            # prints the deploy URL, or exits non-zero
 ```
 
-It prints the deploy's URL on stdout and exits 0 only once that run exists.
+That is the same dispatch the probe makes, and it is preferred here for one
+reason: it does not report success on a request that produced nothing. It waits
+for a `pages.yml` run to appear and exits non-zero if none does.
+
+```
+gh workflow run pages.yml --ref main      # publishes unconditionally. Unverified.
+gh workflow run publish-on-blogs-update.yml --ref main   # decides, then dispatches
+```
+
+Both of those are fine and both are unchecked. `gh workflow run` prints nothing
+and exits 0 on a request the platform accepted and then dropped, so a green
+terminal is not evidence a deploy happened. If you use one, verify it yourself
+before telling anyone the edition is live:
+
+```
+curl -s "https://easyschedule.github.io/belmont-news-site/build-info.json" | grep contentHead
+git ls-remote https://github.com/EasySchedule/belmont-news-blogs.git refs/heads/main
+```
+
+Those two agree when the site is current. That check, and not the exit status of
+the command that started it, is what makes a merge finished.
+
+`publish-now.mjs` needs `GITHUB_TOKEN` and `PUBLISH_REPO`. It holds no stored
+credential; on a checkout of this repository `gh auth token` is enough.
 
 Exit code 2 means the question could not be answered: the store was unreachable,
 or the live site was not serving, or the live site predates the `contentHead`
