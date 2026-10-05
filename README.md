@@ -450,9 +450,10 @@ so a second copy of this site is being served from there right now. It cannot be
 current unless its build syncs the store, which it now does, but it is still not
 the publish path and not the URL to give a reader. See "Hosting" below.
 
-Push to `main` and `pages.yml` publishes. That workflow is the only thing in
-this repository that builds or deploys; every other route into publishing ends
-by dispatching it.
+Pushes to `main` run `pages.yml`, which publishes GitHub Pages. That is the newsroom's
+only publish path, and every other route into publishing ends by dispatching it. Netlify
+also builds from pushes to `main`, but it builds a separate host that is not the publish
+path; see "Hosting" below.
 
 ### A blogs merge publishes the site
 
@@ -522,8 +523,8 @@ fifteen-minute schedule, because the site can be behind for two unrelated reason
 
 Either one dispatches `pages.yml`, through a single dispatch job, so a morning
 that is both behind on content and a day old in the listing still spends one
-deploy. `pages.yml` remains the only thing in this repository that builds or
-deploys.
+deploy. `pages.yml` remains the newsroom's only publish path; Netlify builds a
+separate host from the same pushes and is not part of it.
 
 Without the second check the failure is quiet and easy to miss: on a day when
 nothing was filed, the store head matches the published head, the drift check
