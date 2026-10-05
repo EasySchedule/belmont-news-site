@@ -380,7 +380,7 @@ posts.sort((a, b) => (b.fm.date || '').localeCompare(a.fm.date || '') || (a.fm.s
 // entirely. --newsroom-today pins it so a build can be reproduced and audited.
 const NEWSROOM_TODAY = (opts.newsroomToday || calendarDay(Date.now(), NEWSROOM_TZ)).trim();
 
-const { listed: listedPosts, expired: expiredPosts } = partition(posts, {
+const { listed: listedPosts } = partition(posts, {
   today: NEWSROOM_TODAY,
   days: opts.listingDays,
 });
@@ -396,6 +396,26 @@ const { listed: listedPosts, expired: expiredPosts } = partition(posts, {
 const listingWindowEmpty = listedPosts.length === 0;
 const fallbackPosts = listingWindowEmpty ? posts.slice(0, opts.listingDays) : [];
 const listing = listingWindowEmpty ? fallbackPosts : listedPosts;
+
+// Everything that reports on the listing has to report one partition of the
+// archive: a post is on the front page or it is not, and the two counts add up
+// to the number of posts there are.
+//
+// That stops being true the moment the fallback runs if the report reuses
+// partition()'s `expired` list. The fallback shows the newest posts, and the
+// newest posts are by definition the ones furthest out of window, so they are
+// already in `expired` while also being the ones on the page. Every post on the
+// front page was therefore reported as expired, and listed + expired came to
+// more than the number of posts, which is the invariant the archive check in
+// test/expiry.test.mjs holds the build to. It only bites on a quiet newsroom
+// day, which is exactly when the archive check runs and the build is needed.
+//
+// So "listed" means on the page from here on, and the reported expiry is the
+// complement of the page. This is reporting only: the rendered pages, the feed
+// and the sitemap already used `listing` and are untouched, and
+// check-listing-stale.mjs reads newsroomToday alone.
+const listingUrls = new Set(listing.map((p) => p.url));
+const expiredForListing = posts.filter((p) => !listingUrls.has(p.url));
 
 // ------------------------------------------------------------ corrections
 
@@ -719,9 +739,9 @@ ${urls}
 
 if (opts.check) {
   process.stdout.write(`build.mjs: ${posts.length} post(s) valid, nothing written (--check)\n`);
-  process.stdout.write(`build.mjs: newsroom today ${NEWSROOM_TODAY}, listing window ${opts.listingDays} day(s), ${listing.length} listed, ${expiredPosts.length} expired\n`);
+  process.stdout.write(`build.mjs: newsroom today ${NEWSROOM_TODAY}, listing window ${opts.listingDays} day(s), ${listing.length} listed, ${expiredForListing.length} expired\n`);
   for (const p of posts) {
-    const mark = p.listing.listed ? 'listed  ' : `expired ${p.listing.expires}`;
+    const mark = listingUrls.has(p.url) ? 'listed  ' : `expired ${p.listing.expires}`;
     process.stdout.write(`build.mjs:   ${mark}  ${p.url}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
   }
   if (corrections.logs.length) {
@@ -800,11 +820,11 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
     newsroomToday: NEWSROOM_TODAY,
     windowDays: opts.listingDays,
     listed: listing.length,
-    expired: expiredPosts.length,
+    expired: expiredForListing.length,
     fallback: listingWindowEmpty,
     // Every post stays rendered and stays in the sitemap whatever it says here.
     // This block records the listing decision and nothing else.
-    expiredUrls: expiredPosts.map((p) => `/${p.url}`),
+    expiredUrls: expiredForListing.map((p) => `/${p.url}`),
   },
   correctionsDir: relative(HERE, corrections.dir),
   correctionsFiles: corrections.logs.length,
@@ -830,8 +850,8 @@ try {
 
 process.stdout.write(`build.mjs: built ${posts.length} post(s) into ${opts.out}\n`);
 for (const p of posts) process.stdout.write(`build.mjs:   ${key(p.url)}  ${p.fm.byline}  ${p.fm.title.slice(0, 60)}\n`);
-process.stdout.write(`build.mjs: listing ${listing.length} listed, ${expiredPosts.length} expired, newsroom day ${NEWSROOM_TODAY}, window ${opts.listingDays} day(s)\n`);
-for (const p of expiredPosts) process.stdout.write(`build.mjs:   expired ${p.listing.expires} (${p.listing.from})  ${key(p.url)}\n`);
+process.stdout.write(`build.mjs: listing ${listing.length} listed, ${expiredForListing.length} expired, newsroom day ${NEWSROOM_TODAY}, window ${opts.listingDays} day(s)\n`);
+for (const p of expiredForListing) process.stdout.write(`build.mjs:   expired ${p.listing.expires} (${p.listing.from})  ${key(p.url)}\n`);
 if (listingWindowEmpty) {
   process.stderr.write(
     `build.mjs: WARNING no post is inside the ${opts.listingDays}-day listing window for newsroom day ${NEWSROOM_TODAY}.\n`
