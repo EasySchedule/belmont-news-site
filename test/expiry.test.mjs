@@ -423,3 +423,185 @@ test('the committed archive stays inside the window on any day it is built', () 
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------ the archive notice
+//
+// Ageing a post out of the listing is a recency rule. On 2026-10-05 that was the
+// whole mechanism, and the consequence was that a post's own page was byte-
+// identical whether it was this morning's edition or three days old. The only
+// temporal signal in the markup was the byline's <time datetime>, which reads as
+// a publication date and nothing more. A reader who followed a three-day-old link
+// or arrived from a search result got "free and open 24 hours today" with nothing
+// on the page to date it.
+//
+// The notice is the fix for that, and the tests below are the standard it has to
+// hold to, decided on BEL-139: dated, above the headline, retracting the
+// time-sensitive claims rather than merely noting the age, machine-readable, and
+// present in the served HTML rather than added by CSS.
+
+test('a post outside the window carries the archive notice above its headline', () => {
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    const notice = /<aside class="expired-notice"[\s\S]*?<\/aside>/.exec(page);
+    assert.ok(notice, 'the expired post has a notice at all');
+    // Above the H1, not below the byline and not in the footer. A reader who
+    // skims the headline has to meet the notice before the headline, which is the
+    // only position that satisfies "must not reach the action copy without it".
+    assert.ok(page.indexOf('<aside class="expired-notice"') < page.indexOf('<h1>'),
+      'the notice is rendered before the H1');
+    assert.ok(page.indexOf('</aside>') < page.indexOf('<h1>'),
+      'the whole notice, not just its opening tag, precedes the headline');
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('a post inside the window carries no notice', () => {
+  // The other half of the rule, and the one a sloppy fix breaks: a banner on
+  // today's edition would train every reader to skip it, which retires the
+  // affordance for exactly the posts that need it.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const page = r.pageFor({ date: '2026-10-04', slug: 'today-morning' });
+    assert.doesNotMatch(page, /expired-notice/);
+    assert.doesNotMatch(page, /not current advice/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice is dated with the publication day and the day it left the window', () => {
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    // 2026-10-01 falls out at 00:00 on 2026-10-03: listed on its own day and the
+    // next, out from the third. Both dates are real <time datetime> elements, so
+    // a screen reader announces them as dates rather than as digits.
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    const notice = /<aside class="expired-notice"[\s\S]*?<\/aside>/.exec(page)[0];
+    assert.match(notice, /<time datetime="2026-10-01">2026-10-01<\/time>/, 'names the publication date');
+    assert.match(notice, /<time datetime="2026-10-03">2026-10-03<\/time>/, 'names the day it left the window');
+    assert.match(notice, /role="note"/, 'it is a note, so assistive tech announces it');
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice retracts the time-sensitive claims instead of only noting the age', () => {
+  // "This is an archived article" was rejected on BEL-139 for a specific reason:
+  // it does not retract "you can still go tonight", and the wall-that-heals post
+  // says exactly that about an event that had already closed. Ageing a post is
+  // not the same statement as retracting the claims in it, and only the second
+  // one is true here.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const notice = /<aside class="expired-notice"[\s\S]*?<\/aside>/.exec(
+      r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' }),
+    )[0];
+    assert.match(notice, /accurate as of publication and is not current advice/);
+    // And it names the claim types, so a reader knows which sentences to stop
+    // believing instead of having to guess whether the whole article is void.
+    assert.match(notice, /dates, times and hours/);
+    assert.match(notice, /forecast validity/);
+    assert.match(notice, /event status/);
+    assert.match(notice, /anything that instructs you to act/);
+    // It has to be a retraction, not a suggestion. A reader told the instruction
+    // is "withdrawn" cannot read it as advice.
+    assert.match(notice, /that instruction is withdrawn/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice links to the current front page', () => {
+  // A reader who lands on a three-day-old link needs one route to something
+  // live. Without it the notice retracts the page and offers no next step.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const notice = /<aside class="expired-notice"[\s\S]*?<\/aside>/.exec(
+      r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' }),
+    )[0];
+    assert.match(notice, /<a href="\/">/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice is in the served HTML, so it survives a plain-text copy', () => {
+  // Plain text is how much of this traffic arrives: a reader pasting the page
+  // into a note, a reader on a reader-mode service, a reader whose browser
+  // strips styling. A notice rendered through a ::before pseudo-element is in the
+  // CSS and nowhere else, so it survives none of that, and it would also have
+  // failed Grace's audit, which counted markup and found nothing.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    const css = readFileSync(join(REPO, 'static', 'styles.css'), 'utf8');
+    const cssRule = /\.expired-notice[^{]*\{[^}]*\}/.exec(css);
+    assert.ok(cssRule, 'the notice is styled at all');
+    assert.doesNotMatch(cssRule[0], /::before|::after|content\s*:/,
+      'no pseudo-element may carry the notice text');
+    assert.doesNotMatch(cssRule[0], /display\s*:\s*none|visibility\s*:\s*hidden/,
+      'nothing may hide the notice');
+    // The retraction itself, in the bytes the server returns.
+    assert.match(page, /not current advice/);
+    assert.match(page, /expired-notice/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice leaves the post a full, readable, 200 page at its own URL', () => {
+  // The ruling is that an expired post keeps its body. If the notice ever grew
+  // into a stub, or the page into a redirect, this fails. Belmont County readers
+  // cite these URLs and a 410 would assert a story we published never existed.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    assert.match(page, /<h2>The roundup<\/h2>/, 'the body is still rendered');
+    assert.match(page, /Rain tonight\./, 'the body is not truncated');
+    assert.match(page, /Gridpoint forecast PBZ\/50,48/, 'the sources are still on the page');
+    assert.match(r.sitemap, /<loc>https:\/\/example\.test\/2026-10-01\/three-days-ago\/<\/loc>/,
+      'an expired post stays in the sitemap');
+    assert.deepEqual(r.info.listing.expiredUrls.sort(), [
+      '/2026-10-01/three-days-ago/',
+      '/2026-10-02/two-days-ago/',
+    ], 'build-info.json still discloses them');
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the template never rewrites the body copy', () => {
+  // The half of BEL-139 that is explicitly not authorised. A renderer that bent
+  // tense would publish sentences no reporter or editor ever read, and the way
+  // that ships is silently: the page looks fine and the archive is rewritten.
+  // "Rain tonight." is the fixture body. It has to reach the reader verbatim.
+  const r = buildFixture(TWO_DAYS, { today: '2026-10-04' });
+  try {
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    const body = /<div class="post-body">([\s\S]*?)<\/div>/.exec(page)[1];
+    assert.match(body, /Rain tonight\./);
+    assert.doesNotMatch(body, /Rain ran\.|Rain was\.|Rain that night\./);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test('the notice keys off the window, not off the front page', () => {
+  // When the window comes up empty the listing falls back to the newest posts,
+  // so a post can be on the front page and out of the window at the same time.
+  // The notice is about the post's own currency, so it follows the window. If
+  // this ever keyed off the front page instead, the fallback would silently
+  // strip the notice off the two most expired posts on the site, which are the
+  // two a reader is least able to place in time.
+  const r = buildFixture(TWO_DAYS, { today: '2026-11-20' });
+  try {
+    assert.equal(r.info.listing.fallback, true, 'the fallback is what this test is about');
+    const page = r.pageFor({ date: '2026-10-01', slug: 'three-days-ago' });
+    assert.match(page, /expired-notice/, 'an out-of-window post is noticed even when it is on the front page');
+    assert.match(r.home, /three-days-ago|class="card"/, 'and it is still shown, because the fallback is unchanged');
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});

@@ -162,7 +162,46 @@ deliberately:
 | `/` front page | Drops off the listing. |
 | `/feed.xml` | Drops out of the item list. |
 | `/sitemap.xml` | **Stays.** Every post is listed, listed or not. |
-| `/<date>/<slug>/` | **Stays**, at HTTP 200, with its sources and its corrections. |
+| `/<date>/<slug>/` | **Stays**, at HTTP 200, with its sources and its corrections, **and gains a dated archive notice above the headline.** |
+
+### The archive notice
+
+An expired post's own page used to be identical to a fresh edition's. The only
+temporal signal in the markup was the byline's `<time datetime>`, which reads as a
+publication date and nothing more, so a reader who followed a three-day-old link
+or arrived from a search result got "free and open 24 hours today" with no way to
+place it in time. The Wall That Heals exhibit closed 2026-10-04 at 14:00 and a
+reader arriving on the 5th was told to go tonight. Found in a read-only audit of
+the live site on 2026-10-05 (BEL-120, BEL-133).
+
+So every post outside the window renders an `<aside class="expired-notice"
+role="note">` **before** the `<h1>`. It is mandatory and it is not dismissible:
+
+- **Above the headline**, so a reader who skims meets it before the action copy.
+- **Dated** with the publication day and the day the item left the window, each as
+  a real `<time datetime>`.
+- **Retracts, it does not merely note the age.** It says the item's dates, hours,
+  deadlines, forecasts, event status and instructions were accurate as of
+  publication and **are not current advice**, that anything instructing the reader
+  to act is withdrawn, and it enumerates those claim types so a reader knows which
+  sentences to stop believing. "This is an archived article" is not sufficient; it
+  does not retract "you can still go tonight".
+- **In the served HTML**, not a `::before` pseudo-element, so it survives the page
+  being copied out as plain text and does not depend on the stylesheet loading.
+- **Links to the front page**, so a reader on a stale link has one route to
+  something live.
+
+It is `role="note"` in an `<aside>`, labelled, so assistive technology reaches it
+before the headline. The label is a paragraph, not a heading: the story's own
+`<h1>` stays the first heading on the page.
+
+The notice keys off **the window, not the front page**. When the window comes up
+empty and the listing falls back to the newest posts, a post can be on the front
+page and out of the window at once; the notice follows the window, because the
+notice is about that post's own currency.
+
+Decided on [BEL-139](/BEL/issues/BEL-139) by the managing editor; implemented in
+BEL-133.
 
 ### What this is not
 

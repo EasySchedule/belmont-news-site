@@ -113,6 +113,39 @@ main {
 .card h2 a { color: var(--ink); text-decoration: none; }
 .card h2 a:hover, .card h2 a:focus-visible { color: var(--accent); text-decoration: underline; }
 
+/* --------------------------------------------------------- archive notice */
+
+/* The notice on a post that has left the listing window. It renders before the
+ * headline in the markup, and nothing here hides it, collapses it or moves it:
+ * a notice a reader cannot see is not a notice. The border and the accent
+ * background are the whole treatment, and they are what makes the block
+ * unmissable on a long story where the action copy is several paragraphs down. */
+.expired-notice {
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+  padding: 1.1rem 1.25rem 1.2rem;
+  margin: 0 0 2rem;
+  border-radius: 3px;
+}
+
+.expired-notice-heading {
+  margin: 0 0 0.7rem;
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.expired-notice p { margin: 0 0 0.8rem; max-width: var(--measure); }
+.expired-notice ul { margin: 0 0 0.9rem; padding-left: 1.3rem; max-width: var(--measure); }
+.expired-notice li { margin-bottom: 0.35rem; }
+.expired-notice a { color: var(--accent); }
+.expired-notice > :last-child { margin-bottom: 0; }
+
 /* ----------------------------------------------------------------- post */
 
 .post .kicker { margin-bottom: 0.5rem; }

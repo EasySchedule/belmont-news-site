@@ -13,7 +13,7 @@ import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NEWSROOM_TZ, publicationInstant, buildEpochMs, calendarDay } from './scripts/dates.mjs';
 import { readCorrections, correctionsIndexUrl, correctionsMonthUrl } from './scripts/corrections.mjs';
-import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, partition } from './scripts/expiry.mjs';
+import { DEFAULT_LISTING_DAYS, listingExpiry, expiryError, partition, publicationDay } from './scripts/expiry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -590,10 +590,79 @@ ${items}
 </section>`;
 }
 
+// The archive notice, mandatory on every post that has left the listing window.
+//
+// Before this, a post's page was byte-identical whether it was this morning's
+// edition or a week old. The only temporal signal anywhere in the markup was the
+// byline's <time datetime>, which reads as a publication date and nothing more.
+// So a reader who followed a three-day-old link, arrived from a search result or
+// had the URL bookmarked got "the grounds are free and open 24 hours today" and
+// "take a jacket before 8 p.m. tonight" with no way to tell those sentences were
+// written three days earlier. The text was not merely undecorated, it was false:
+// the exhibit in wall-that-heals-st-clairsville closed 2026-10-04 at 2 p.m. and a
+// reader arriving on the 5th was told to go tonight. That was found in a
+// read-only audit of the live site (BEL-120), filed as BEL-133.
+//
+// What this notice deliberately does NOT do:
+//
+//   - It does not rewrite the body. A template that pastes a notice onto the page
+//     is the cheap half and is wanted. A template that bends tense is a new way to
+//     publish sentences nobody wrote and nobody checked. "Take a jacket before
+//     8 p.m. tonight" is corrected by a human through a correction, or not at all.
+//     The managing editor ruled against automated tense rewriting on BEL-139, and
+//     the upstream fix for the copy itself is the QA gate on BEL-162.
+//   - It does not withdraw the page. No 410, no delete, no redirect. The post keeps
+//     its URL, its HTTP 200, its full body, its sources and its sitemap entry.
+//     Publication is permanent; the front-page window is not.
+//   - It does not invent a retraction the desk did not publish. It states the
+//     status of the item's own time-sensitive claims, which is a fact about the
+//     build: the item is out of the window, and claims anchored to a moment that
+//     has passed cannot be current advice.
+//
+// Why the wording is what it is. "This is an archived article" was rejected on
+// BEL-139 as insufficient, and correctly so: it does not retract "you can still
+// go tonight". So the notice names the publication date, the date the item left
+// the window, states that deadlines/hours/forecasts/instructions were accurate as
+// of publication and are not current advice, and enumerates the claim types to
+// distrust so a reader knows which sentences to stop believing. It also links to
+// the current front page, which is the only route a reader arriving on a stale
+// link needs in order to get to something live.
+//
+// Machine-readable, and visible without CSS. role="note" in an <aside> with a
+// real <time datetime> on both dates, so a screen reader reaches it before the
+// headline, and the region is labelled so entering it announces what it is. The
+// label is a paragraph, not a heading: the story's own <h1> is the first heading
+// on the page, and a status banner that demotes the headline out of the document
+// outline would introduce its own navigation defect.
+//
+// Every word of it is in the served HTML, not a ::before pseudo-element: a notice
+// that vanishes when the page is copied as plain text has not been delivered to
+// the reader who needed it, and plain-text copy is how a lot of this traffic
+// arrives.
+function archiveNotice(p) {
+  if (listingUrls.has(p.url)) return '';
+  const published = publicationDay(p.fm);
+  const leftWindow = p.listing.expires;
+  return `<aside class="expired-notice" role="note" aria-labelledby="expired-notice-heading">
+  <p class="expired-notice-heading" id="expired-notice-heading">Archived article — not current advice</p>
+  <p>Published <time datetime="${esc(published)}">${esc(published)}</time>. It left the listing window on <time datetime="${esc(leftWindow)}">${esc(leftWindow)}</time>, and is kept in full at this address as the public record of what we published.</p>
+  <p><strong>Every date, hour, deadline, forecast, event status and instruction in this article was accurate as of publication and is not current advice.</strong> It has not been updated since, and nothing in it tells you what is true now or what to do today.</p>
+  <p>Do not rely on:</p>
+  <ul>
+    <li>dates, times and hours — they were correct on the publication date and have since passed;</li>
+    <li>forecast validity — a forecast period stated here has ended and has been superseded;</li>
+    <li>event status — an event described as running, open or upcoming may have finished, moved or been cancelled;</li>
+    <li>anything that instructs you to act — if the article says to go, buy, book, call or call in before a time, that instruction is withdrawn.</li>
+  </ul>
+  <p>For news from today, <a href="${esc(key(''))}">go to the front page</a>.</p>
+</aside>
+`;
+}
+
 function postPage(p) {
   const fm = p.fm;
   const body = `
-<article class="post">
+${archiveNotice(p)}<article class="post">
   <p class="kicker">${esc(EDITION_LABEL[fm.edition] || fm.edition || 'News')}${fm.column ? ` · ${esc(fm.column)}` : ''}</p>
   <h1>${esc(fm.title)}</h1>
   ${fm.dek ? `<p class="dek">${esc(fm.dek)}</p>` : ''}
