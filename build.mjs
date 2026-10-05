@@ -342,6 +342,42 @@ function fail(msg) {
   process.exit(1);
 }
 
+// ------------------------------------------------- byline contact address
+//
+// RSS 2.0 defines <author> as the email address of the item's author, not as the
+// person's name. The feed used to print the display name there, which is
+// off-spec, and readers that honour the spec drop it. That left the byline
+// living in exactly one field on exactly the surface most likely to be read by
+// software, which is not a byline. BEL-138.
+//
+// The name now travels in <dc:creator>, which is what feed readers actually
+// display, and <author> carries an address. No address is invented: the roster
+// in the markdown store carries none, so a post that does not supply one emits
+// no <author> at all rather than a bare name in a field whose whole meaning is
+// "this is an address". A made-up mailbox in a newsroom feed is a contact point
+// that bounces, and a bounced contact point is worse than no contact point.
+//
+// So the address is opt-in, per post, as `byline_email`, and it is checked here.
+// An address that is not an address stops the build for the same reason an
+// unsourced post does: it would reach a reader's reader as a broken byline, and
+// the only place to catch that is before the publish.
+const EMAIL = /^[^\s@,;:<>()[\]\\]+@[^\s@,;:<>()[\]\\]+\.[^\s@,;:<>()[\]\\]+$/;
+
+function bylineEmail(fm) {
+  const raw = fm?.byline_email;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  return String(raw).trim();
+}
+
+function bylineEmailError(fm, file) {
+  const value = bylineEmail(fm);
+  if (value === null) return null;
+  if (EMAIL.test(value)) return null;
+  return `${file}: byline_email must be an email address, got ${JSON.stringify(value)}. `
+    + 'The feed only puts a real address in <author>; a display name there is off-spec and readers drop it. '
+    + 'Leave the field out if this byline has no published address: the name still ships in <dc:creator>.';
+}
+
 // ------------------------------------------------------------ discovery
 
 function walk(dir, out = []) {
@@ -383,6 +419,8 @@ const posts = files.map((f) => {
   // which is the exact defect this rule was added to remove.
   const badExpiry = expiryError(data, rel);
   if (badExpiry) fail(badExpiry);
+  const badEmail = bylineEmailError(data, rel);
+  if (badEmail) fail(badEmail);
   return { file: rel, fm: data, body: body.trim(), url: `${data.date}/${data.slug}/` };
 });
 
@@ -715,25 +753,97 @@ const feedItems = listing
     || (b.post.fm.date || '').localeCompare(a.post.fm.date || '')
     || a.post.fm.slug.localeCompare(b.post.fm.slug));
 
+// How long a reader may cache this feed, in minutes.
+//
+// RSS 2.0 defines <ttl> as the number of minutes the channel can be cached
+// before it is checked again. It was absent, so every reader picks its own
+// interval, and the ones that pick a long one sit on a two-day-old feed for a
+// day. The newsroom publishes at 06:00 and 20:00 America/New_York and
+// publish-on-blogs-update.yml probes every 15 minutes, so 60 is comfortably
+// inside the gap between a story being filed and a reader seeing it, and it is
+// reported in build-info.json so the number is auditable rather than buried.
+const FEED_TTL_MINUTES = 60;
+
+// The channel's own clock.
+//
+// <lastBuildDate> is documented as "the last time the content of the channel
+// changed". It was the build instant, so on a quiet newsroom day the feed said it
+// had just been rebuilt while every item in it was days old: a reader's reader
+// saw a fresh timestamp and a stale front page and had no way to tell those apart.
+// On 2026-10-05 it read Mon, 05 Oct 2026 13:24:00 GMT over two items published
+// Sat, 03 Oct 2026 04:00:00 GMT. BEL-138.
+//
+// The newest item's publication instant is the moment the channel last gained
+// content, which is what the field means. Clamped to the build instant for the
+// same reason every pubDate is: nothing in the feed is ever dated later than the
+// build that emitted it, and an empty channel falls back to the build instant
+// because a channel with no items has no newer content to report. A rebuild that
+// changes nothing therefore reports nothing new, which is the point.
+const newestItemAt = feedItems.reduce((newest, { publishedAt }) => Math.max(newest, publishedAt), 0);
+const lastBuildAt = Math.min(newestItemAt || SHIPPED_AT, SHIPPED_AT);
+
+// The channel's second Atom link, to the corrections log.
+//
+// RSS 2.0 has no channel element for "see also". It defines title, link,
+// description and a fixed list of optional elements, and none of them points at
+// another page on the site. The Atom extension is the one place a feed can carry
+// a second URL, so `atom:link rel="related"` is the only spec-legal way to say
+// this, and it is what the board chose on 2026-10-05 for BEL-138 over the two
+// alternatives: leaving the feed with no route to the log, and publishing every
+// correction as a feed item.
+//
+// Be clear about what this is worth, because the honest answer is "not much to a
+// reader's reader". Most readers render `rel="self"` and ignore everything else,
+// so a subscriber will not see the link in the app. What it does buy is that the
+// feed itself stops being a dead end for anything that reads the XML: a validator,
+// an archive tool, or a reader that does honour `related` now has the corrections
+// log in the same document as the stories, which is the promise the footer makes
+// in the words "corrections are published, never silently applied".
+//
+// It is a channel element, not an item, so it never enters a reader's story list
+// and never costs a subscriber an unread item. That is the deliberate difference
+// from the item option, and it is why this one is safe to ship without an
+// editorial review of new reader-visible copy: the only words here are the word
+// "Corrections", which is the masthead's own.
+//
+// The target always resolves. `/corrections/` is written on every build whether or
+// not a log exists, so this link can never point at a 404 the way a per-post
+// correction link deliberately can.
 function feed() {
-  const items = feedItems.map(({ post: p, publishedAt }) => `  <item>
-    <title>${esc(p.fm.title)}</title>
-    <link>${esc(abs(p.url))}</link>
-    <guid isPermaLink="true">${esc(abs(p.url))}</guid>
-    <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>
-    <author>${esc(p.fm.byline)}</author>
-    <category>${esc(p.fm.category || 'news')}</category>
-    <description>${esc(p.fm.dek || '')}</description>
-  </item>`).join('\n');
+  const items = feedItems.map(({ post: p, publishedAt }) => {
+    // The address goes in <author> only when the post supplies one, and the name
+    // goes in <dc:creator> always. See bylineEmail() for why no address is
+    // invented: an absent <author> costs a reader nothing, an off-spec one costs
+    // them the byline.
+    //
+    // The element is dropped rather than left as an empty line, so the served
+    // bytes do not carry a hole where a byline used to be for every item until
+    // the roster grows an address.
+    const address = bylineEmail(p.fm);
+    const lines = [
+      `  <item>`,
+      `    <title>${esc(p.fm.title)}</title>`,
+      `    <link>${esc(abs(p.url))}</link>`,
+      `    <guid isPermaLink="true">${esc(abs(p.url))}</guid>`,
+      `    <pubDate>${new Date(publishedAt).toUTCString()}</pubDate>`,
+      address ? `    <author>${esc(address)}</author>` : null,
+      `    <dc:creator>${esc(p.fm.byline)}</dc:creator>`,
+      `    <category>${esc(p.fm.category || 'news')}</category>`,
+      `    <description>${esc(p.fm.dek || '')}</description>`,
+      `  </item>`,
+    ];
+    return lines.filter((l) => l !== null).join('\n');
+  }).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
 <channel>
   <title>Belmont News</title>
   <link>${esc(opts.siteUrl)}/</link>
   <atom:link href="${esc(abs('feed.xml'))}" rel="self" type="application/rss+xml" />
   <description>Independent local news for Belmont County, Ohio.</description>
   <language>en-us</language>
-  <lastBuildDate>${new Date(SHIPPED_AT).toUTCString()}</lastBuildDate>
+  <lastBuildDate>${new Date(lastBuildAt).toUTCString()}</lastBuildDate>
+  <ttl>${FEED_TTL_MINUTES}</ttl>
 ${items}
 </channel>
 </rss>
@@ -906,13 +1016,31 @@ writeFileSync(join(outDir, 'build-info.json'), `${JSON.stringify({
     entries: log.entries.length,
     title: log.title,
   })),
-  feed: feedItems.map(({ post: p, publishedAt }) => ({
-    url: `/${p.url}`,
-    date: p.fm.date,
-    edition: p.fm.edition || null,
-    pubDate: new Date(publishedAt).toUTCString(),
-    clampedToBuildEpoch: publishedAt === SHIPPED_AT,
-  })),
+  feed: {
+    // The channel clock, reported rather than buried. `lastBuildDate` is the
+    // newest item's instant, not the build instant, so a rebuild that changed
+    // nothing reports nothing new; `ttl` is the caching hint the feed gives a
+    // reader's reader. Both are the questions an auditor asks of a feed that
+    // looks stale, and both used to be unanswerable from the served bytes.
+    lastBuildDate: new Date(lastBuildAt).toUTCString(),
+    ttlMinutes: FEED_TTL_MINUTES,
+    items: feedItems.length,
+    authorsWithAddress: feedItems.filter(({ post }) => bylineEmail(post.fm)).length,
+    correctionsLink: abs(correctionsIndexUrl),
+    entries: feedItems.map(({ post: p, publishedAt }) => ({
+      url: `/${p.url}`,
+      date: p.fm.date,
+      edition: p.fm.edition || null,
+      // The byline as a reader gets it: the name in <dc:creator>, and an
+      // <author> only when the post supplies a real address. `author: null`
+      // means the feed carries the name and no address, which is the correct
+      // state for a byline that has no published mailbox.
+      byline: p.fm.byline,
+      author: bylineEmail(p.fm),
+      pubDate: new Date(publishedAt).toUTCString(),
+      clampedToBuildEpoch: publishedAt === SHIPPED_AT,
+    })),
+  },
 }, null, 2)}\n`);
 copyFileSync(join(HERE, 'static', 'styles.css'), join(outDir, 'styles.css'));
 try {
